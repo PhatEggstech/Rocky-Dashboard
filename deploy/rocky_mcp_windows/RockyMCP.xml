@@ -1,0 +1,20 @@
+<service>
+  <id>RockyMCP</id>
+  <name>Rocky MCP Server</name>
+  <description>Rocky Lens MCP Streamable HTTP server</description>
+  <executable>C:\ProgramData\RockyMCP\current\venv\Scripts\python.exe</executable>
+  <arguments>C:\ProgramData\RockyMCP\current\scripts\start_mcp_production_oauth.py</arguments>
+  <workingdirectory>C:\ProgramData\RockyMCP\current</workingdirectory>
+  <env name="MCP_ENV_FILE" value="C:\ProgramData\RockyMCP\config\.env" />
+  <env name="MCP_LOG_DIR" value="C:\ProgramData\RockyMCP\logs" />
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <onfailure action="restart" delay="10 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>20 sec</stoptimeout>
+  <logpath>C:\ProgramData\RockyMCP\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

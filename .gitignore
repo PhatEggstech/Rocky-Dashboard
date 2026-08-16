@@ -1,0 +1,30 @@
+# Secrets and machine-specific runtime state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.sqlite3
+*.sqlite3-*
+*.db
+auth/
+logs/
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+*.egg-info/
+
+# Windows and editors
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+
