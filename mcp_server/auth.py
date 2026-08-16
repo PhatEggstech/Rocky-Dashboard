@@ -23,7 +23,6 @@ from dataclasses import dataclass, asdict
 from typing import Callable
 
 import psycopg
-from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 

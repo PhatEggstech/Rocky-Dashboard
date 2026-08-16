@@ -15,10 +15,9 @@ import base64
 import time
 import uvicorn
 import psycopg
-from urllib.parse import urlencode, parse_qs, urlparse
+from urllib.parse import urlencode
 from starlette.responses import JSONResponse, RedirectResponse, HTMLResponse
 from starlette.routing import Route
-from starlette.requests import Request
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

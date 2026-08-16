@@ -1,0 +1,39 @@
+name: Deploy Rocky MCP
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Deployment target
+        required: true
+        type: choice
+        options: [staging, production]
+      ref:
+        description: "Git ref to deploy (default: main)"
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rocky-mcp-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, windows, rocky-mcp-customer]
+    environment: ${{ inputs.target == 'production' && 'rocky-mcp-production' || 'rocky-mcp-staging' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          clean: true
+      - name: Publish release and validate health
+        shell: powershell
+        run: |
+          $releaseId = "${{ github.sha }}".Substring(0, 12) + "-" + (Get-Date -Format "yyyyMMddHHmmss")
+          .\deploy\rocky_mcp_windows\publish_release.ps1 `
+            -Target "${{ inputs.target }}" `
+            -SourceDirectory $PWD.Path `
+            -ReleaseId $releaseId

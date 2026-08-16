@@ -22,9 +22,12 @@ htmlcov/
 venv/
 *.egg-info/
 
+# GitHub Actions self-hosted runner state
+.runner/
+actions-runner/
+
 # Windows and editors
 .vscode/
 .idea/
 Thumbs.db
 Desktop.ini
-

@@ -1362,7 +1362,7 @@ def query_orders(date_from: str, date_to: str, status: str | None = None, paymen
                         pos_params
                     )
                     created_orders_count = pos_cur.fetchone()[0]
-        except Exception as e:
+        except Exception:
             # Fallback is silent
             pass
 
@@ -1901,7 +1901,6 @@ def query_raw_sql(sql: str) -> dict:
     Chỉ cho phép truy vấn READ-ONLY và KHÔNG được phép truy cập bảng 'users' bảo mật.
     """
     from decimal import Decimal
-    import re
     
     sql_clean = sql.strip().lower()
     
@@ -1952,7 +1951,6 @@ def query_raw_pos_sql(sql: str) -> dict:
     Chỉ cho phép truy vấn READ-ONLY.
     """
     from decimal import Decimal
-    import re
     
     sql_clean = sql.strip().lower()
     
@@ -3026,7 +3024,7 @@ def trigger_send_debt_reminders() -> dict:
             if not data["normal_invoices"] and not data["urgent_invoices"]:
                 continue
                 
-            msg = f"🔔 *Rocky Bot: BÁO CÁO CÔNG NỢ ĐẠI LÝ HÀNG NGÀY (AI TRIGGERED)*\n\n"
+            msg = "🔔 *Rocky Bot: BÁO CÁO CÔNG NỢ ĐẠI LÝ HÀNG NGÀY (AI TRIGGERED)*\n\n"
             msg += f"Chào *{data['name']}*,\nDưới đây là danh sách hóa đơn quá hạn của đại lý do bạn phụ trách:\n\n"
             
             total_debt = 0
@@ -3048,7 +3046,7 @@ def trigger_send_debt_reminders() -> dict:
                     msg += f"   • SĐT: `{inv['phone']}`\n\n"
                     total_debt += inv["debt"]
                     
-            msg += f"➖ ➖ ➖ ➖ ➖ ➖ ➖ ➖ ➖\n"
+            msg += "➖ ➖ ➖ ➖ ➖ ➖ ➖ ➖ ➖\n"
             msg += f"💰 *Tổng công nợ quá hạn cần xử lý: {total_debt:,.0f} VND*\n\n"
             msg += "👉 _Vui lòng khẩn trương liên hệ đối soát và thu hồi nợ gối đầu._"
             

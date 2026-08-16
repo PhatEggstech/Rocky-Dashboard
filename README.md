@@ -61,3 +61,22 @@ python scripts\provision_local_user.py `
 4. Restart `RockyMCP`, health-check `127.0.0.1:8085/health`, keep ingress/tunnel process unchanged.
 5. Roll back the `current` junction if the health gate fails.
 
+## CI/CD
+
+`CI` runs on every pull request and on pushes to `main`: static undefined-name
+checks, bytecode compilation, and the test suite on Python 3.10 and 3.11.
+
+`Deploy Rocky MCP` is manual only. It requires a self-hosted GitHub Actions
+runner on the customer Windows host with the labels `self-hosted`, `windows`,
+and `rocky-mcp-customer`:
+
+1. Run the workflow with target `staging`; it creates an isolated release,
+   runs the tests, starts `RockyMCPStaging`, and validates port 8086.
+2. Review staging results and run the workflow again with target `production`.
+3. Protect the `rocky-mcp-production` GitHub Environment with required
+   reviewers. The production script health-checks port 8085 and restores the
+   previous `current` junction automatically if startup fails.
+
+The runner needs local Administrator rights only for Windows service control.
+Credentials stay in `C:\ProgramData\RockyMCP\config`; CI artifacts and Git
+never receive DSNs, passwords, OAuth data, or tunnel credentials.
