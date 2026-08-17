@@ -69,7 +69,7 @@ from .wms_tools import (
     query_wms_health,
 )
 
-MCP_VERSION = "2026.08.06-routing2"
+MCP_VERSION = "2026.08.17-disclaimer1"
 VN_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 RelativePeriod = Literal[
     "today", "yesterday", "this_week", "last_week", "this_month"
@@ -185,6 +185,76 @@ BOD_ALLOWED_TOOLS = frozenset({
     "get_dashboard_revenue",
 })
 
+_DASHBOARD_TOOLS = frozenset({
+    "get_revenue_by_source",
+    "get_dashboard_order_overview",
+    "get_tinh_hinh_kinh_doanh",
+    "get_dashboard_order_by_site",
+    "get_dashboard_revenue",
+    "get_dashboard_sales_by_customer",
+    "get_dashboard_debt_overview",
+    "get_dashboard_debt_customers",
+    "get_dashboard_metric",
+})
+_WMS_TOOLS = frozenset({
+    "check_wms_health",
+    "get_warehouses_live",
+    "get_inventory_live",
+    "get_inventory_movements",
+    "get_outbound_deliveries",
+    "query_raw_wms_sql_tool",
+})
+_RAW_OR_SCHEMA_TOOLS = frozenset({
+    "query_raw_sql_tool",
+    "query_raw_pos_sql_tool",
+    "query_raw_wms_sql_tool",
+    "list_tables_tool",
+    "describe_table_tool",
+    "get_schema_quick_context_tool",
+    "search_schema_tool",
+    "describe_pos_table_tool",
+})
+
+
+def _result_disclaimer(tool_name: str) -> dict:
+    """Return a concise, source-specific caveat for every successful tool call."""
+    if tool_name in _DASHBOARD_TOOLS:
+        return {
+            "type": "dashboard_snapshot",
+            "message": (
+                "Số liệu là snapshot read-only từ Rocky Lens Dashboard tại thời điểm truy vấn. "
+                "Chỉ tiêu Tổng doanh thu dùng phạm vi Dashboard đang chọn; khi có cả "
+                "HMK và Khác thì Tổng bao gồm cả hai nguồn."
+            ),
+            "reconciliation": "Dùng Dashboard Rocky Lens làm nguồn đối soát KPI UI; không dùng số này làm chứng từ kế toán cuối kỳ.",
+        }
+    if tool_name in _WMS_TOOLS:
+        return {
+            "type": "wms_live_snapshot",
+            "message": (
+                "Tồn kho và chuyển động kho là snapshot WMS live tại thời điểm truy vấn; "
+                "có thể thay đổi sau nhập/xuất, kiểm kê hoặc đồng bộ."
+            ),
+            "reconciliation": "Xác nhận lại chứng từ kho và thời điểm chốt trước khi ra quyết định điều chuyển hoặc kiểm kê.",
+        }
+    if tool_name == "get_revenue_legacy":
+        return {
+            "type": "legacy_pos_reconciliation",
+            "message": "Đây là đối soát cohort từ POS legacy, không phải chỉ tiêu hiển thị chính thức trên Dashboard Rocky Lens.",
+            "reconciliation": "Không thay thế KPI Dashboard hoặc số liệu kế toán bằng kết quả này nếu chưa được Finance xác nhận.",
+        }
+    if tool_name in _RAW_OR_SCHEMA_TOOLS:
+        return {
+            "type": "technical_read_only_result",
+            "message": "Kết quả là dữ liệu read-only phục vụ phân tích kỹ thuật; việc diễn giải nghiệp vụ cần đối chiếu quy tắc Dashboard/POS hiện hành.",
+            "reconciliation": "Không sử dụng trực tiếp làm kết luận tài chính, tồn kho hoặc quyết định vận hành nếu chưa đối soát nguồn chuẩn.",
+        }
+    return {
+        "type": "read_only_snapshot",
+        "message": "Kết quả là snapshot read-only tại thời điểm truy vấn và có thể thay đổi khi dữ liệu nguồn được duyệt hoặc đồng bộ.",
+        "reconciliation": "Đối chiếu nguồn nghiệp vụ phù hợp trước khi dùng cho chứng từ hoặc quyết định chính thức.",
+    }
+
 def track_tool(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -212,6 +282,7 @@ def track_tool(func):
                 if res.get("code") in (401, 403):
                     tracker_logger.warning(f"[BLOCKED] Tool '{tool_name}' | {user_info} | {res.get('error')}")
                     return res
+                res.setdefault("disclaimer", _result_disclaimer(tool_name))
                 res_info = f"Result keys: {list(res.keys())}"
             else:
                 res_info = "non-dict result"
