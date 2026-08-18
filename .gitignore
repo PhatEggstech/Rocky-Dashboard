@@ -12,6 +12,9 @@ auth/
 logs/
 outputs/
 
+# Local artifact generation helpers. Published deliverables live in docs/.
+artifacts/
+
 # Python
 __pycache__/
 *.py[cod]
