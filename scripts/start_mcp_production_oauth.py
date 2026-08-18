@@ -28,7 +28,9 @@ try:
     env_path = Path(os.environ.get("MCP_ENV_FILE", PROJECT_ROOT / ".env"))
     if env_path.exists():
         # The service config is authoritative. Do not keep stale machine-level DSNs.
-        load_dotenv(env_path, override=True)
+        # Windows editors may prepend a UTF-8 BOM. Read it explicitly so the
+        # first key is not interpreted as "\ufeffDASHBOARD_PG_DSN".
+        load_dotenv(env_path, override=True, encoding="utf-8-sig")
 except Exception as e:
     print(f"Error loading env: {e}", file=sys.stderr)
 
