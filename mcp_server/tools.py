@@ -44,6 +44,70 @@ def _anonymize_name(name: str | None) -> str:
     return f"{parts[0]} *** {parts[-1]}"
 
 
+_READ_ONLY_WRITE_KEYWORDS = re.compile(
+    r"\b(?:alter|analyze|call|cluster|comment|copy|create|delete|do|drop|"
+    r"grant|insert|listen|lock|merge|notify|refresh|reindex|revoke|set|"
+    r"truncate|update|vacuum)\b",
+    re.IGNORECASE,
+)
+
+
+def _sql_code_without_literals_or_comments(sql: str) -> str:
+    """Mask quoted values and comments before applying a conservative SQL guard."""
+    masked: list[str] = []
+    index = 0
+    length = len(sql)
+    while index < length:
+        char = sql[index]
+        next_char = sql[index + 1] if index + 1 < length else ""
+        if char == "-" and next_char == "-":
+            end = sql.find("\n", index + 2)
+            index = length if end == -1 else end
+            masked.append(" ")
+        elif char == "/" and next_char == "*":
+            end = sql.find("*/", index + 2)
+            index = length if end == -1 else end + 2
+            masked.append(" ")
+        elif char in {"'", '"'}:
+            quote = char
+            masked.append(" ")
+            index += 1
+            while index < length:
+                if sql[index] == quote:
+                    if index + 1 < length and sql[index + 1] == quote:
+                        index += 2
+                        continue
+                    index += 1
+                    break
+                index += 1
+        else:
+            masked.append(char)
+            index += 1
+    return "".join(masked)
+
+
+def validate_read_only_sql(sql: str) -> str | None:
+    """Return a validation error, or ``None`` for a single SELECT/CTE query.
+
+    CTE queries are common in analysis. They are safe only when every write
+    keyword is absent, so this deliberately conservative guard accepts SELECT
+    and WITH while rejecting DML/DDL and multi-statement input.
+    """
+    if not isinstance(sql, str) or not sql.strip():
+        return "SQL query không được để trống."
+
+    code = _sql_code_without_literals_or_comments(sql).strip()
+    if code.endswith(";"):
+        code = code[:-1].rstrip()
+    if ";" in code:
+        return "Chỉ cho phép một câu SELECT hoặc WITH ... SELECT read-only."
+    if not re.match(r"^(?:select|with)\b", code, flags=re.IGNORECASE):
+        return "Chỉ được phép thực hiện câu lệnh SELECT hoặc WITH ... SELECT (Read-only)."
+    if _READ_ONLY_WRITE_KEYWORDS.search(code):
+        return "Không cho phép từ khóa ghi hoặc thay đổi cấu trúc trong SQL read-only."
+    return None
+
+
 SPECS_DIR = Path(__file__).resolve().parent / "specs"
 POS_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 SCHEMA_QUICK_CONTEXT = {
@@ -1903,10 +1967,10 @@ def query_raw_sql(sql: str) -> dict:
     from decimal import Decimal
     
     sql_clean = sql.strip().lower()
-    
-    # 1. Security: Only allow SELECT
-    if not sql_clean.startswith("select"):
-        return {"error": "Chỉ được phép thực hiện câu lệnh SELECT (Read-only)."}
+
+    validation_error = validate_read_only_sql(sql)
+    if validation_error:
+        return {"error": validation_error}
         
     # 2. Security: Do not allow accessing 'users' table
     if re.search(r"\busers\b", sql_clean):
@@ -1952,11 +2016,9 @@ def query_raw_pos_sql(sql: str) -> dict:
     """
     from decimal import Decimal
     
-    sql_clean = sql.strip().lower()
-    
-    # 1. Security: Only allow SELECT
-    if not sql_clean.startswith("select"):
-        return {"error": "Chỉ được phép thực hiện câu lệnh SELECT (Read-only)."}
+    validation_error = validate_read_only_sql(sql)
+    if validation_error:
+        return {"error": validation_error}
         
     conn = _get_pos_conn()
     try:

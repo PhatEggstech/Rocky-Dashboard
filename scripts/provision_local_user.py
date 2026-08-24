@@ -14,7 +14,20 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from dotenv import load_dotenv
+
+
+def _load_runtime_env() -> None:
+    """Use the same env file convention as the Windows MCP service."""
+    env_path = Path(os.environ.get("MCP_ENV_FILE", PROJECT_ROOT / ".env"))
+    if env_path.exists():
+        load_dotenv(env_path, override=False, encoding="utf-8-sig")
+
+
+_load_runtime_env()
+
 from mcp_server.auth import clear_key_cache
+from mcp_server.config import MCP_AUTH_BACKEND
 from mcp_server.local_auth import LocalAuthStore, VALID_ROLES
 
 
@@ -25,6 +38,13 @@ def main() -> None:
     parser.add_argument("--role", required=True, choices=sorted(VALID_ROLES))
     parser.add_argument("--name", required=True)
     args = parser.parse_args()
+
+    if MCP_AUTH_BACKEND != "sqlite":
+        raise SystemExit(
+            "MCP_AUTH_BACKEND is not sqlite. This script would create a user "
+            "that the running service cannot authenticate; provision the "
+            "configured dashboard_pg identity store instead."
+        )
 
     password = os.environ.pop("MCP_PROVISION_PASSWORD", "") or getpass.getpass(
         "Password (stored only as a salted hash): "

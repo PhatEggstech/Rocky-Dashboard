@@ -10,14 +10,23 @@ import json
 import os
 import sys
 from pathlib import Path
+import hashlib
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from dotenv import load_dotenv
+
+env_path = Path(os.environ.get("MCP_ENV_FILE", PROJECT_ROOT / ".env"))
+if env_path.exists():
+    load_dotenv(env_path, override=False, encoding="utf-8-sig")
+
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
+from mcp_server.config import DASHBOARD_PG_DSN, MCP_AUTH_BACKEND
 from mcp_server.local_auth import LocalAuthStore
+import psycopg
 
 
 async def call_tools(url: str, api_key: str) -> dict[str, int | str]:
@@ -30,10 +39,12 @@ async def call_tools(url: str, api_key: str) -> dict[str, int | str]:
             for tool, arguments, expected in (
                 ("get_tinh_hinh_kinh_doanh", {"relative_period": "today"}, "allowed"),
                 ("get_products", {"top_n": 3}, "allowed"),
+                ("get_dashboard_sales_by_customer", {"top_n": 3}, "allowed"),
+                ("get_dashboard_debt_overview", {"relative_period": "today"}, "allowed"),
                 ("query_raw_pos_sql_tool", {"sql": "SELECT 1"}, "blocked"),
                 ("get_inventory_live", {"limit": 1}, "blocked"),
                 ("get_dashboard_metric", {"metric": "revenue_details"}, "blocked"),
-                ("get_dashboard_sales_by_customer", {}, "blocked"),
+                ("get_debt", {}, "blocked"),
                 ("trigger_debt_reminders", {}, "blocked"),
             ):
                 response = await session.call_tool(tool, arguments)
@@ -47,6 +58,31 @@ async def call_tools(url: str, api_key: str) -> dict[str, int | str]:
     return results
 
 
+def resolve_api_key(database: str, username: str, password: str) -> str | None:
+    """Use the same auth backend as the running server, without printing a key."""
+    if MCP_AUTH_BACKEND == "sqlite":
+        login = LocalAuthStore(database).verify_login(username, password)
+        return login[0] if login else None
+
+    if MCP_AUTH_BACKEND == "dashboard_pg":
+        if not DASHBOARD_PG_DSN:
+            raise SystemExit("DASHBOARD_PG_DSN is not configured")
+        password_hash = hashlib.sha256(password.encode()).hexdigest()
+        with psycopg.connect(DASHBOARD_PG_DSN, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT api_key FROM api_keys
+                    WHERE username = %s AND password_hash = %s AND is_active = TRUE
+                    """,
+                    (username, password_hash),
+                )
+                row = cur.fetchone()
+        return row[0] if row else None
+
+    raise SystemExit(f"Unsupported MCP_AUTH_BACKEND: {MCP_AUTH_BACKEND}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--database", required=True)
@@ -57,10 +93,9 @@ def main() -> None:
     if not password:
         raise SystemExit("MCP_PROVISION_PASSWORD is required")
 
-    login = LocalAuthStore(args.database).verify_login(args.username, password)
-    if not login:
+    api_key = resolve_api_key(args.database, args.username, password)
+    if not api_key:
         raise SystemExit("BOD login verification failed")
-    api_key = login[0]
     results = asyncio.run(call_tools(args.url, api_key))
     print(json.dumps(results, ensure_ascii=True, sort_keys=True))
     if any(value != "PASS" for value in results.values()):

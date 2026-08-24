@@ -183,7 +183,19 @@ BOD_ALLOWED_TOOLS = frozenset({
     "get_tinh_hinh_kinh_doanh",
     "get_dashboard_order_by_site",
     "get_dashboard_revenue",
+    "get_dashboard_sales_by_customer",
+    "get_dashboard_debt_overview",
 })
+
+# BOD can use aggregate Dashboard reports, but not raw SQL, warehouse data,
+# purchase-cost data, payment receipt detail, or customer-level debt records.
+# Return a useful alternative when Claude chooses a disallowed legacy tool.
+_BOD_TOOL_ALTERNATIVES = {
+    "get_customer_sales": ["get_dashboard_sales_by_customer"],
+    "get_customers": ["get_dashboard_sales_by_customer"],
+    "get_debt": ["get_dashboard_debt_overview"],
+    "get_dashboard_debt_customers": ["get_dashboard_debt_overview"],
+}
 
 _DASHBOARD_TOOLS = frozenset({
     "get_revenue_by_source",
@@ -255,6 +267,21 @@ def _result_disclaimer(tool_name: str) -> dict:
         "reconciliation": "Đối chiếu nguồn nghiệp vụ phù hợp trước khi dùng cho chứng từ hoặc quyết định chính thức.",
     }
 
+
+def _tool_failure(res: object) -> str | None:
+    """Recognize structured tool failures before logging a false success."""
+    if not isinstance(res, dict):
+        return None
+    if res.get("error"):
+        return str(res["error"])
+    if res.get("ok") is False:
+        return "Tool returned ok=false"
+    code = res.get("code")
+    if isinstance(code, int) and code >= 400:
+        return f"Tool returned code={code}"
+    return None
+
+
 def track_tool(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -264,10 +291,13 @@ def track_tool(func):
         user = get_current_user()
         user_info = f"User: {user.name} ({user.role})" if user else "User: Anonymous"
         if user and user.role == "bod" and tool_name not in BOD_ALLOWED_TOOLS:
+            alternatives = _BOD_TOOL_ALTERNATIVES.get(tool_name, [])
             result = {
                 "error": "Permission denied. The BOD role may only use approved aggregate executive reports.",
                 "code": 403,
                 "user": user.name,
+                "alternatives": alternatives,
+                "allowed_aggregate_tools": sorted(BOD_ALLOWED_TOOLS),
             }
             tracker_logger.warning(
                 f"[BLOCKED] Tool '{tool_name}' | {user_info} | BOD allow-list"
@@ -278,6 +308,13 @@ def track_tool(func):
             res = func(*args, **kwargs)
             duration = (time.time() - start_time) * 1000
             if isinstance(res, dict):
+                failure = _tool_failure(res)
+                if failure:
+                    tracker_logger.error(
+                        f"[FAILURE] Tool '{tool_name}' | Duration: {duration:.2f}ms | "
+                        f"{user_info} | Err: {failure}"
+                    )
+                    return res
                 # Check for permission errors
                 if res.get("code") in (401, 403):
                     tracker_logger.warning(f"[BLOCKED] Tool '{tool_name}' | {user_info} | {res.get('error')}")
@@ -610,15 +647,19 @@ def get_tinh_hinh_kinh_doanh(
 
     overview = query_dashboard_order_overview(resolved_from, resolved_to, site_ids)
     by_site = query_dashboard_order_by_site(resolved_from, resolved_to, site_ids)
-    staff = query_staff_revenue(resolved_from, resolved_to, None)
+    # This tool represents the Dashboard overview. Use the dashboard staff
+    # endpoint too, rather than silently mixing a POS-only staff calculation.
+    staff = query_dashboard_metric(
+        "order_by_staff", resolved_from, resolved_to, site_ids=site_ids
+    )
 
     return {
         "metric": "business_summary",
-        "source": "rocky_dashboard_api + pos",
+        "source": "rocky_dashboard_api",
         "period": {"date_from": resolved_from, "date_to": resolved_to, "label": period_label},
         "overview": overview.get("data", {}) if overview.get("ok") else {"error": overview.get("error")},
         "by_site": by_site.get("data", {}) if by_site.get("ok") else {"error": by_site.get("error")},
-        "staff": staff,
+        "staff": staff.get("data", {}) if staff.get("ok") else {"error": staff.get("error")},
         "query_context": _query_context(resolved_from, resolved_to, period_label, None),
     }
 
