@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--password", required=True)
     parser.add_argument("--inspect-revenue", action="store_true")
     parser.add_argument("--inspect-overview", action="store_true")
+    parser.add_argument("--inspect-business-summary", action="store_true")
     parser.add_argument("--inspect-payment-document-types", action="store_true")
     parser.add_argument("--inspect-legacy-revenue", action="store_true")
     parser.add_argument("--raw-pos-sql", help="Read-only POS SQL for controlled validation")
@@ -177,6 +178,13 @@ def main() -> int:
     overview_ok, overview_status, overview_payload = call_tool(
         "get_dashboard_order_overview", dashboard_arguments, 7
     )
+    business_summary_ok = True
+    business_summary_status = 0
+    business_summary_payload: dict = {}
+    if args.inspect_business_summary:
+        business_summary_ok, business_summary_status, business_summary_payload = call_tool(
+            "get_tinh_hinh_kinh_doanh", dashboard_arguments, 10
+        )
     legacy_ok = True
     legacy_status = 0
     legacy_payload: dict = {}
@@ -285,6 +293,8 @@ def main() -> int:
         "dashboard_revenue_status": dashboard_status,
         "dashboard_overview_tool_ok": overview_ok,
         "dashboard_overview_status": overview_status,
+        "business_summary_tool_ok": business_summary_ok,
+        "business_summary_status": business_summary_status,
         "legacy_revenue_tool_ok": legacy_ok,
         "legacy_revenue_status": legacy_status,
         "payment_document_types_tool_ok": payment_types_ok,
@@ -302,6 +312,11 @@ def main() -> int:
         result["dashboard_revenue_data"] = dashboard_payload.get("data")
     if args.inspect_overview:
         result["dashboard_overview_data"] = overview_payload.get("data")
+    if args.inspect_business_summary:
+        result["business_summary_source"] = business_summary_payload.get("source")
+        result["business_summary_has_staff_error"] = bool(
+            business_summary_payload.get("staff", {}).get("error")
+        )
     if args.inspect_legacy_revenue:
         result["legacy_revenue_data"] = legacy_payload
     if args.inspect_payment_document_types:
@@ -315,6 +330,8 @@ def main() -> int:
         "revenue_by_source_tool_ok", "dashboard_revenue_tool_ok", "revenue_matches_dashboard",
         "dashboard_overview_tool_ok",
     )
+    if args.inspect_business_summary:
+        required += ("business_summary_tool_ok",)
     return 0 if all(result[key] for key in required) else 1
 
 
