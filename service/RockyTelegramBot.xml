@@ -1,0 +1,20 @@
+<service>
+  <id>RockyTelegramBot</id>
+  <name>Rocky Telegram Bot</name>
+  <description>Rocky read-only Telegram adapter for approved private chats</description>
+  <executable>C:\ProgramData\RockyMCP\current\venv\Scripts\python.exe</executable>
+  <arguments>C:\ProgramData\RockyMCP\current\scripts\run_telegram_bot.py</arguments>
+  <workingdirectory>C:\ProgramData\RockyMCP\current</workingdirectory>
+  <env name="MCP_ENV_FILE" value="C:\ProgramData\RockyMCP\config\.env" />
+  <env name="MCP_LOG_DIR" value="C:\ProgramData\RockyMCP\logs" />
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <onfailure action="restart" delay="10 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>30 sec</stoptimeout>
+  <logpath>C:\ProgramData\RockyMCP\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

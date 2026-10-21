@@ -12,12 +12,9 @@ while ($true) {
         -o ServerAliveInterval=30 `
         -o ServerAliveCountMax=3 `
         -o StrictHostKeyChecking=accept-new `
-        -p 2223 `
         -R 15432:127.0.0.1:5432 `
         -R 15433:10.39.93.133:5432 `
-        -R 15434:10.39.93.117:5432 `
-        -R 15435:10.39.93.133:5432 `
-        HP@127.0.0.1 2>&1 | Add-Content -Path $log
+        HP@100.69.180.66 2>&1 | Add-Content -Path $log
     Add-Content -Path $log -Value "$(Get-Date -Format o) bridge exited; retrying in 10 seconds"
     Start-Sleep -Seconds 10
 }

@@ -15,6 +15,7 @@ from .tools import (
     query_return_exchange_requests,
     query_return_orders,
     query_debt,
+    query_customer_debt_profile,
     query_staff_revenue,
     query_orders,
     query_order_operations,
@@ -47,8 +48,15 @@ from .tools import (
     query_picker_leaderboard,
     query_picker_efficiency,
     query_raw_pos_sql,
+    query_bod_retail_pos_sql,
     query_telegram_mappings,
     trigger_send_debt_reminders,
+)
+from .regional_tools import (
+    query_field_sales_by_zone,
+    query_regional_receipts,
+    query_sale_zones,
+    validate_asm_date_range,
 )
 from .dashboard_api import (
     query_dashboard_order_overview,
@@ -59,17 +67,26 @@ from .dashboard_api import (
     query_dashboard_debt_overview,
     query_dashboard_debt_customers,
 )
-from .auth import require_role, enforce_store_filter, enforce_staff_filter, get_current_user
+from .auth import (
+    bod_access_decision,
+    enforce_bod_hmk_customer_filter,
+    is_bod_assistant,
+    enforce_staff_filter,
+    enforce_store_filter,
+    get_current_user,
+    require_role,
+)
 from .wms_tools import (
     query_inventory_live,
     query_inventory_movements,
     query_outbound_deliveries,
     query_raw_wms_sql,
+    query_bod_wms_sql,
     query_warehouses_live,
     query_wms_health,
 )
 
-MCP_VERSION = "2026.08.17-disclaimer1"
+MCP_VERSION = "2026.10.14-employee-groups2"
 VN_TIMEZONE = ZoneInfo("Asia/Ho_Chi_Minh")
 RelativePeriod = Literal[
     "today", "yesterday", "this_week", "last_week", "this_month"
@@ -160,6 +177,40 @@ def _query_context(
         "effective_store_id": scoped_store,
     }
 
+
+def _resolve_asm_reporting_range(
+    date_from: str | None,
+    date_to: str | None,
+    relative_period: RelativePeriod | None,
+) -> tuple[str, str, str]:
+    """Resolve dates and apply the approved start date for ASM accounts."""
+    resolved_from, resolved_to, period_label = _resolve_reporting_range(
+        date_from, date_to, relative_period
+    )
+    user = get_current_user()
+    if user and user.role == "asm":
+        validate_asm_date_range(resolved_from, resolved_to)
+    return resolved_from, resolved_to, period_label
+
+
+def _resolve_asm_sale_zone_scope(
+    requested_zone_ids: list[str] | None,
+) -> list[str]:
+    """Return an ASM's allowed zones, rejecting a caller-supplied expansion."""
+    requested = list(dict.fromkeys(
+        str(value).strip() for value in requested_zone_ids or [] if str(value).strip()
+    ))
+    user = get_current_user()
+    if not user or user.role != "asm":
+        return requested
+
+    allowed = list(dict.fromkeys(user.sale_zone_ids))
+    if not allowed:
+        raise PermissionError("ASM account has no assigned sales-zone scope")
+    if requested and not set(requested).issubset(set(allowed)):
+        raise PermissionError("Requested sales zone is outside this ASM account scope")
+    return requested or allowed
+
 # Set up dedicated logger for tracking tool calls
 tracker_logger = logging.getLogger("mcp_tracker")
 # Avoid adding handlers multiple times
@@ -170,32 +221,6 @@ if not tracker_logger.handlers:
     handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
     tracker_logger.addHandler(handler)
     tracker_logger.setLevel(logging.INFO)
-
-# Executive accounts get a deliberately small, read-only surface. Keep this
-# check in the tracking wrapper so an unprotected tool cannot be exposed by a
-# missing decorator elsewhere in this module.
-BOD_ALLOWED_TOOLS = frozenset({
-    "get_mcp_context",
-    "explain",
-    "get_revenue_by_source",
-    "get_products",
-    "get_dashboard_order_overview",
-    "get_tinh_hinh_kinh_doanh",
-    "get_dashboard_order_by_site",
-    "get_dashboard_revenue",
-    "get_dashboard_sales_by_customer",
-    "get_dashboard_debt_overview",
-})
-
-# BOD can use aggregate Dashboard reports, but not raw SQL, warehouse data,
-# purchase-cost data, payment receipt detail, or customer-level debt records.
-# Return a useful alternative when Claude chooses a disallowed legacy tool.
-_BOD_TOOL_ALTERNATIVES = {
-    "get_customer_sales": ["get_dashboard_sales_by_customer"],
-    "get_customers": ["get_dashboard_sales_by_customer"],
-    "get_debt": ["get_dashboard_debt_overview"],
-    "get_dashboard_debt_customers": ["get_dashboard_debt_overview"],
-}
 
 _DASHBOARD_TOOLS = frozenset({
     "get_revenue_by_source",
@@ -289,20 +314,50 @@ def track_tool(func):
         start_time = time.time()
         # Include user info in tracking
         user = get_current_user()
-        user_info = f"User: {user.name} ({user.role})" if user else "User: Anonymous"
-        if user and user.role == "bod" and tool_name not in BOD_ALLOWED_TOOLS:
-            alternatives = _BOD_TOOL_ALTERNATIVES.get(tool_name, [])
-            result = {
-                "error": "Permission denied. The BOD role may only use approved aggregate executive reports.",
-                "code": 403,
-                "user": user.name,
-                "alternatives": alternatives,
-                "allowed_aggregate_tools": sorted(BOD_ALLOWED_TOOLS),
-            }
-            tracker_logger.warning(
-                f"[BLOCKED] Tool '{tool_name}' | {user_info} | BOD allow-list"
-            )
+        from .portal_policy import enabled as portal_enabled, dispatch as portal_dispatch
+        if portal_enabled() and user is None:
+            return {'error':'Authentication required','code':401}
+        if portal_enabled() and user.role != 'admin':
+            tracker_logger.info('Portal API tool=%s user=%s',tool_name,user.user_id)
+            result=portal_dispatch(func,args,kwargs)
+            tracker_logger.info('Portal API tool=%s user=%s code=%s',tool_name,user.user_id,
+                result.get('code',result.get('http_status')) if isinstance(result,dict) else None)
             return result
+        user_info = f"User: {user.name} ({user.role})" if user else "User: Anonymous"
+        # Employee rollout starts with the UUID-scoped report. Other tools must
+        # implement equivalent row filters before employee access is enabled.
+        employee_allowed = {'get_staff_revenue', 'get_customers', 'get_order_operations', 'get_employee_receipts', 'get_scoped_customer_debt', 'get_assigned_orders'}
+        accountant_allowed = {'get_order_operations', 'get_employee_receipts', 'get_scoped_customer_debt', 'get_customers'}
+        warehouse_allowed = {'get_inventory_live', 'get_inventory_movements', 'get_outbound_deliveries', 'get_warehouses_live'}
+        restricted_tools = {'staff': employee_allowed, 'accountant': accountant_allowed, 'warehouse': warehouse_allowed,
+            'sales_manager': {'get_assigned_orders'}, 'shipper': {'get_assigned_orders', 'get_assigned_order_inventory'}}
+        if user and user.role in restricted_tools and tool_name not in restricted_tools[user.role]:
+            tracker_logger.warning(f"[BLOCKED] Tool '{tool_name}' | {user_info} | Employee scope not implemented")
+            return {"error": "This tool has no verified employee data scope", "code": 403}
+        if user and user.role in {'staff', 'manager', 'accountant', 'warehouse', 'sales_manager', 'shipper'}:
+            if user.role in {'staff', 'sales_manager', 'shipper'} and not user.staff_id:
+                return {"error": "Employee mapping required", "code": 403}
+            if user.role in {'manager', 'accountant'} and not user.store_id and not (user.role == 'accountant' and user.all_sites):
+                return {"error": "Branch mapping required", "code": 403}
+            if user.role == 'warehouse' and not user.warehouse_ids:
+                return {"error": "Warehouse mapping required", "code": 403}
+            if user.role == 'warehouse' and tool_name == 'get_outbound_deliveries' and not user.staff_id:
+                return {"error": "Employee mapping required for own outbound deliveries", "code": 403}
+            if tool_name in {'get_gpm', 'get_npm'} and not user.can_view_cost:
+                return {"error": "Explicit cost access required", "code": 403}
+        if is_bod_assistant(user):
+            allowed, alternatives, reason = bod_access_decision(tool_name, args, kwargs)
+            if not allowed:
+                result = {
+                    "error": f"Permission denied. {reason}",
+                    "code": 403,
+                    "user": user.name,
+                    "alternatives": alternatives,
+                }
+                tracker_logger.warning(
+                    f"[BLOCKED] Tool '{tool_name}' | {user_info} | BOD HMK-customer policy"
+                )
+                return result
         tracker_logger.info(f"[CALL] Tool '{tool_name}' | {user_info} | Args: {args} | Kwargs: {kwargs}")
         try:
             res = func(*args, **kwargs)
@@ -338,6 +393,166 @@ def track_tool(func):
 
 @mcp.tool()
 @track_tool
+def get_portal_record(resource: Literal['order','customer','outbound_delivery','product_item_warehouse_inventory','warehouse'], object_id: str) -> dict:
+    """Read one RK record by UUID using your own portal session; GET requests only."""
+    from .portal_read_api import query_portal_detail
+    return query_portal_detail(resource,object_id)
+
+
+@mcp.tool()
+@track_tool
+def get_my_api_capabilities() -> dict:
+    """Discover supported per-user Rocky read API tools before choosing a tool.
+
+    Verifies the current user's Rocky profile. Describes fixed API routes,
+    arguments, unavailable list/report adapters and restrictions. Does not
+    grant object access or prove access to every resource. Never returns tokens.
+    """
+    from .portal_capabilities import query_my_api_capabilities
+    return query_my_api_capabilities()
+
+
+@mcp.tool()
+@track_tool
+def get_portal_list(resource: Literal['orders','customers','products','product_items','staff',
+    'payments','sale_zones','return_orders','warranties','warehouses','outbound_deliveries',
+    'purchase_orders','stock_takes','stock_transfers'], page: int = 1, size: int = 20,
+    date_from: str | None = None, date_to: str | None = None, code: str | None = None,
+    ownership: Literal['visible','mine_revenue'] = 'visible') -> dict:
+    """Read a paginated Rocky list with the signed-in user's own API token.
+
+    Call get_my_api_capabilities for resource descriptions. These are fixed
+    read-only POST GetPage routes, not write operations. Rocky controls record
+    visibility. A page is not a complete dataset; do not compute global totals
+    from it. No raw SQL, shared credentials, arbitrary URLs or write actions.
+    For orders and payments, date_from/date_to filter issueAt in Vietnam time.
+    Code and mine_revenue are orders-only: mine_revenue resolves staff from the
+    current Rocky profile; visible means all records the API allows, not
+    necessarily personal orders. Use resource=payments for SSO receipt lists;
+    do not use the legacy SQL receipt tools.
+    """
+    from .portal_read_api import query_portal_list
+    return query_portal_list(resource,page,size,date_from,date_to,code,ownership)
+
+
+@mcp.tool()
+@track_tool
+def get_orders_created_summary(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    relative_period: RelativePeriod | None = None,
+) -> dict:
+    """Summarize footer values for orders created in a date range using SSO API.
+
+    Use this when the user asks for values on the Rocky Order screen filtered
+    by ``Ngay tao``: count, product amount, shipping fee, order discount,
+    return value, amount due, paid amount and remaining amount. It groups by
+    Order.IssueAt, not PaymentOrder.IssueAt. Therefore it is not a cash
+    collection or revenue-in-the-period query. The result covers only rows
+    visible to the signed-in Rocky user and never uses SQL.
+    """
+    resolved_from, resolved_to, period_label = _resolve_reporting_range(
+        date_from, date_to, relative_period
+    )
+    from .portal_read_api import query_orders_created_summary
+    result = query_orders_created_summary(resolved_from, resolved_to)
+    if isinstance(result, dict) and not result.get('error'):
+        result['query_context'] = _query_context(
+            resolved_from, resolved_to, period_label, None
+        )
+    return result
+
+
+@mcp.tool()
+@track_tool
+def get_effective_date_payment_summary(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    relative_period: RelativePeriod | None = None,
+) -> dict:
+    """Return the Phiếu thu chi screen's Tổng thu for an effective-date range.
+
+    ``total_receipt_amount`` is exactly the payment-screen Tổng thu: sum of
+    PaymentOrder.needPayAmount where DocumentType is Thu (1), grouped by
+    PaymentOrder.IssueAt. Do not calculate Thu + Cấn trừ - Hoàn: Allocate is a
+    debt-offset allocation, not new cash, and can already relate to a receipt.
+    Refund is reported separately, not subtracted from this screen's Tổng thu.
+    The result only uses the signed-in user's Rocky API.
+    """
+    resolved_from, resolved_to, period_label = _resolve_reporting_range(
+        date_from, date_to, relative_period
+    )
+    from .portal_read_api import query_effective_date_payment_summary
+    result = query_effective_date_payment_summary(resolved_from, resolved_to)
+    if isinstance(result, dict) and not result.get('error'):
+        result['query_context'] = _query_context(
+            resolved_from, resolved_to, period_label, None
+        )
+    return result
+
+
+@mcp.tool()
+@track_tool
+@require_role('staff', 'sales_manager', 'shipper')
+def get_assigned_orders(date_from: str | None = None, date_to: str | None = None,
+                        code: str | None = None, limit: int = 50, offset: int = 0,
+                        ownership: Literal['mine_revenue','visible'] = 'mine_revenue') -> dict:
+    """Own orders/history; shipping contacts only for the assigned shipper."""
+    from .assigned_orders import query_assigned_orders
+    user = get_current_user()
+    if user and user.portal_session:
+        if type(limit) is not int or not 1<=limit<=100 or type(offset) is not int or offset<0 or offset%limit:
+            return {'error':'Use limit 1..100 and an offset divisible by limit','code':400}
+        from .portal_read_api import query_portal_list
+        return query_portal_list('orders',offset//limit+1,limit,date_from,date_to,code,ownership)
+    assignment = {'staff': 'revenue', 'sales_manager': 'management', 'shipper': 'shipper'}[user.role]
+    return query_assigned_orders(str(user.staff_id), assignment, date_from, date_to, code, limit, offset)
+
+
+@mcp.tool()
+@track_tool
+@require_role('shipper')
+def get_assigned_order_inventory(order_code: str) -> dict:
+    """Inventory for items and warehouse of an order assigned to this shipper."""
+    from .shipping_inventory import query_shipping_inventory
+    return query_shipping_inventory(str(get_current_user().staff_id), order_code)
+
+@mcp.tool()
+@track_tool
+@require_role('admin', 'manager', 'staff', 'accountant')
+def get_employee_receipts(date_from: str, date_to: str, limit: int = 50, offset: int = 0) -> dict:
+    """Legacy SQL receipt calculation for internal mapped roles only.
+
+    Individual Rocky SSO sessions must use get_portal_list(resource='payments',
+    date_from=..., date_to=...) so Rocky enforces their API permissions.
+    """
+    from .employee_tools import query_scoped_receipts
+    user = get_current_user()
+    if user.role == 'admin':
+        return {"error": "Use regional receipts or POS tools for admin-wide reporting", "code": 400}
+    return query_scoped_receipts(date_from, date_to,
+        staff_id=str(user.staff_id) if user.role == 'staff' else None,
+        store_id=str(user.store_id) if user.role != 'staff' and user.store_id is not None else None,
+        include_hmk=user.include_hmk, limit=limit, offset=offset,
+        all_sites=user.role == 'accountant' and user.all_sites)
+
+
+@mcp.tool()
+@track_tool
+@require_role('admin', 'manager', 'staff', 'accountant')
+def get_scoped_customer_debt(customer_code: str) -> dict:
+    """Customer order debt within branch/employee scope; global ledger is not mixed in."""
+    from .employee_tools import query_scoped_customer_debt
+    user = get_current_user()
+    if user.role == 'admin':
+        return query_customer_debt_profile(customer_code)
+    return query_scoped_customer_debt(customer_code,
+        staff_id=str(user.staff_id) if user.role == 'staff' else None,
+        store_id=str(user.store_id) if user.role != 'staff' and user.store_id is not None else None,
+        include_hmk=user.include_hmk, all_sites=user.role == 'accountant' and user.all_sites)
+
+@mcp.tool()
+@track_tool
 @require_role('admin')
 def query_raw_sql_tool(sql: str) -> dict:
     """[ADMIN] Chạy câu lệnh SQL SELECT tùy ý (Read-only) trên database dashboard."""
@@ -348,7 +563,9 @@ def query_raw_sql_tool(sql: str) -> dict:
 @track_tool
 @require_role('admin')
 def query_raw_pos_sql_tool(sql: str) -> dict:
-    """[ADMIN] Chạy câu lệnh SQL SELECT tùy ý (Read-only) trên database POS gốc."""
+    """Chạy SELECT POS; bod_assistant chỉ dùng lớp raw an toàn đã loại HMK."""
+    if is_bod_assistant(get_current_user()):
+        return query_bod_retail_pos_sql(sql)
     return query_raw_pos_sql(sql)
 
 
@@ -356,7 +573,9 @@ def query_raw_pos_sql_tool(sql: str) -> dict:
 @track_tool
 @require_role('admin')
 def query_raw_wms_sql_tool(sql: str) -> dict:
-    """[ADMIN] Chạy một câu SELECT read-only trên database kho Rocky WMS."""
+    """Chạy SELECT WMS; bod_assistant chỉ dùng allow-list relation kho/tồn."""
+    if is_bod_assistant(get_current_user()):
+        return query_bod_wms_sql(sql)
     return query_raw_wms_sql(sql)
 
 
@@ -370,15 +589,16 @@ def check_wms_health() -> dict:
 
 @mcp.tool()
 @track_tool
-@require_role('admin')
+@require_role('admin', 'warehouse')
 def get_warehouses_live() -> dict:
     """[ADMIN] Danh sách kho/site và tổng tồn hiện tại từ WMS."""
-    return query_warehouses_live()
+    user = get_current_user()
+    return query_warehouses_live(allowed_warehouse_ids=list(user.warehouse_ids) if user and user.role == 'warehouse' else None)
 
 
 @mcp.tool()
 @track_tool
-@require_role('admin')
+@require_role('admin', 'warehouse')
 def get_inventory_live(
     warehouse_code: str | None = None,
     product_search: str | None = None,
@@ -386,12 +606,15 @@ def get_inventory_live(
     limit: int = 50,
 ) -> dict:
     """[ADMIN] Tồn kho trực tiếp theo kho hoặc sản phẩm; tự fallback cache khi WMS lỗi."""
-    return query_inventory_live(warehouse_code, product_search, low_stock_only, limit)
+    user = get_current_user()
+    return query_inventory_live(warehouse_code, product_search, low_stock_only, limit,
+        allowed_warehouse_ids=list(user.warehouse_ids) if user and user.role == 'warehouse' else None,
+        include_cost=user.can_view_cost if user and user.role == 'warehouse' else True)
 
 
 @mcp.tool()
 @track_tool
-@require_role('admin')
+@require_role('admin', 'warehouse')
 def get_inventory_movements(
     date_from: str,
     date_to: str,
@@ -401,12 +624,14 @@ def get_inventory_movements(
     limit: int = 100,
 ) -> dict:
     """[ADMIN] Lịch sử nhập/xuất/điều chỉnh tồn kho trực tiếp từ WMS. Format ngày: YYYY-MM-DD."""
-    return query_inventory_movements(date_from, date_to, warehouse_code, product_search, include_cancelled, limit)
+    user = get_current_user()
+    return query_inventory_movements(date_from, date_to, warehouse_code, product_search, include_cancelled, limit,
+        allowed_warehouse_ids=list(user.warehouse_ids) if user and user.role == 'warehouse' else None)
 
 
 @mcp.tool()
 @track_tool
-@require_role('admin')
+@require_role('admin', 'warehouse')
 def get_outbound_deliveries(
     date_from: str,
     date_to: str,
@@ -415,7 +640,11 @@ def get_outbound_deliveries(
     limit: int = 100,
 ) -> dict:
     """[ADMIN] Phiếu xuất kho theo ngày/kho/trạng thái từ WMS. Status: completed/cancelled/processing."""
-    return query_outbound_deliveries(date_from, date_to, warehouse_code, status, limit)
+    user = get_current_user()
+    return query_outbound_deliveries(date_from, date_to, warehouse_code, status, limit,
+        allowed_warehouse_ids=list(user.warehouse_ids) if user and user.role == 'warehouse' else None,
+        include_cost=user.can_view_cost if user and user.role == 'warehouse' else True,
+        assigned_staff_id=str(user.staff_id) if user and user.role == 'warehouse' and user.staff_id else None)
 
 
 @mcp.tool()
@@ -441,6 +670,18 @@ def get_debt(customer_name: str | None = None, date_from: str | None = None, dat
 @mcp.tool()
 @track_tool
 @require_role('admin', 'manager')
+def get_customer_debt_profile(customer_code: str) -> dict:
+    """Hồ sơ công nợ an toàn cho một mã KH chính xác.
+
+    Tách nợ đơn Hoàn thành, đơn Đã xác nhận chưa hoàn thành, sổ CustomerCashDebt,
+    đơn hủy bị loại và đơn trả tham chiếu. Không suy diễn hành vi thanh toán.
+    """
+    return query_customer_debt_profile(customer_code)
+
+
+@mcp.tool()
+@track_tool
+@require_role('admin', 'manager')
 @enforce_store_filter
 def get_inventory(category: str | None = None, dead_stock_only: bool = False) -> dict:
     """Lấy tồn kho. dead_stock_only=True để xem hàng chết (>90 ngày không bán)."""
@@ -449,16 +690,26 @@ def get_inventory(category: str | None = None, dead_stock_only: bool = False) ->
 
 @mcp.tool()
 @track_tool
-@require_role('admin', 'manager')
+@require_role('admin', 'manager', 'staff', 'accountant')
 @enforce_store_filter
-def get_customers(segment: str | None = None, top_n: int = 10) -> dict:
+def get_customers(segment: str | None = None, top_n: int = 10, store_id: str | None = None, search: str | None = None, offset: int = 0) -> dict:
     """Lấy khách hàng RFM. Segments: Champion, Loyal, At-Risk, Hibernating, Lost"""
+    user = get_current_user()
+    if user and user.role in {'staff', 'manager', 'accountant'}:
+        from .employee_tools import query_employee_customers
+        if segment:
+            return {"error": "RFM segmentation unavailable for scoped customer directory", "code": 400}
+        return query_employee_customers(staff_id=str(user.staff_id) if user.role == 'staff' else None,
+            store_id=str(user.store_id) if user.role != 'staff' and user.store_id is not None else None,
+            include_hmk=user.include_hmk, limit=top_n, offset=offset, search=search,
+            all_sites=user.role == 'accountant' and user.all_sites)
     return query_customers(segment, top_n)
 
 
 @mcp.tool()
 @track_tool
 @require_role('admin', 'manager', 'bod')
+@enforce_bod_hmk_customer_filter
 @enforce_store_filter
 def get_customer_sales(
     date_from: str | None = None,
@@ -469,6 +720,7 @@ def get_customer_sales(
     order_type: int | None = None,
     store_id: str | None = None,
     relative_period: RelativePeriod | None = None,
+    exclude_hmk_customers: bool = False,
 ) -> dict:
     """Doanh số theo khách hàng giống màn Doanh số KH của Rocky Lens.
 
@@ -486,6 +738,7 @@ def get_customer_sales(
         page_size,
         order_type,
         store_id,
+        exclude_hmk_customers,
     )
     result["query_context"] = _query_context(
         resolved_from, resolved_to, period_label, store_id
@@ -532,6 +785,106 @@ def get_vip_revenue_drop_alerts(limit: int = 20) -> dict:
 def get_telegram_mappings() -> dict:
     """Xem danh sách nhân viên đã đăng ký nhận cảnh báo nợ qua Telegram Bot."""
     return query_telegram_mappings()
+
+
+# ===========================================================================
+# ASM RETAIL REPORTING (all assigned sales zones, HMK excluded in POS)
+# ===========================================================================
+
+@mcp.tool()
+@track_tool
+@require_role('admin', 'asm')
+def get_regional_sale_zones(sale_zone_ids: list[str] | None = None) -> dict:
+    """Danh sach vung thi truong ma tai khoan ASM duoc phep xem."""
+    try:
+        zone_ids = _resolve_asm_sale_zone_scope(sale_zone_ids)
+    except PermissionError as exc:
+        return {"error": str(exc), "code": 403}
+    return query_sale_zones(zone_ids)
+
+
+@mcp.tool()
+@track_tool
+@require_role('admin', 'asm')
+def get_regional_field_sales(sale_zone_ids: list[str] | None = None) -> dict:
+    """Danh sach sale thi truong theo vung, tu StaffAsignSaleZone cua POS."""
+    try:
+        zone_ids = _resolve_asm_sale_zone_scope(sale_zone_ids)
+    except PermissionError as exc:
+        return {"error": str(exc), "code": 403}
+    return query_field_sales_by_zone(zone_ids)
+
+
+@mcp.tool()
+@track_tool
+@require_role('admin', 'asm')
+def get_regional_order_operations(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sale_zone_ids: list[str] | None = None,
+    date_field: str = "issue",
+    state: str | None = None,
+    payment_state: int | None = None,
+    code: str | None = None,
+    customer: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    relative_period: RelativePeriod | None = None,
+) -> dict:
+    """Don retail chi tiet theo SalesZone; ASM bi chan HMK va du lieu truoc 30/04/2026."""
+    try:
+        zone_ids = _resolve_asm_sale_zone_scope(sale_zone_ids)
+        resolved_from, resolved_to, period_label = _resolve_asm_reporting_range(
+            date_from, date_to, relative_period
+        )
+    except PermissionError as exc:
+        return {"error": str(exc), "code": 403}
+    except ValueError as exc:
+        return {"error": str(exc), "code": 400}
+    result = query_order_operations(
+        resolved_from, resolved_to, date_field, state, payment_state, code, customer,
+        None, limit, offset, True, zone_ids,
+    )
+    result["sale_zone_ids"] = zone_ids
+    result["hmk_excluded_by"] = "Customer.IsHmkCustomer = TRUE"
+    result["query_context"] = _query_context(
+        resolved_from, resolved_to, period_label, None
+    )
+    return result
+
+
+@mcp.tool()
+@track_tool
+@require_role('admin', 'asm')
+def get_regional_receipts(
+    date_from: str | None = None,
+    date_to: str | None = None,
+    sale_zone_ids: list[str] | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    relative_period: RelativePeriod | None = None,
+) -> dict:
+    """Legacy SQL regional receipt calculation for internal mapped roles only.
+
+    Individual Rocky SSO sessions must use get_portal_list(resource='payments',
+    date_from=..., date_to=...) so Rocky enforces their API permissions.
+    """
+    try:
+        zone_ids = _resolve_asm_sale_zone_scope(sale_zone_ids)
+        resolved_from, resolved_to, period_label = _resolve_asm_reporting_range(
+            date_from, date_to, relative_period
+        )
+    except PermissionError as exc:
+        return {"error": str(exc), "code": 403}
+    except ValueError as exc:
+        return {"error": str(exc), "code": 400}
+    result = query_regional_receipts(
+        resolved_from, resolved_to, zone_ids, limit, offset
+    )
+    result["query_context"] = _query_context(
+        resolved_from, resolved_to, period_label, None
+    )
+    return result
 
 
 # ===========================================================================
@@ -888,6 +1241,7 @@ def get_orders(date_from: str, date_to: str, status: str | None = None, payment_
 
 @mcp.tool()
 @track_tool
+@enforce_bod_hmk_customer_filter
 @enforce_store_filter
 def get_order_operations(
     date_from: str | None = None,
@@ -900,14 +1254,19 @@ def get_order_operations(
     store_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    exclude_hmk_customers: bool = False,
 ) -> dict:
     """Tra cứu vận hành Order: đơn tạm/xác nhận/giao/hoàn thành và các tổng tiền của màn Quản lý đơn hàng.
 
     Không dùng tool này để trả lời KPI doanh thu hoặc thực thu.
     """
+    user = get_current_user()
+    assigned_staff_id = str(user.staff_id) if user and user.role == 'staff' else None
+    if user and user.role in {'staff', 'manager', 'accountant'}:
+        exclude_hmk_customers = not user.include_hmk
     return query_order_operations(
         date_from, date_to, date_field, state, payment_state, code, customer,
-        store_id, limit, offset,
+        store_id, limit, offset, exclude_hmk_customers, assigned_staff_id=assigned_staff_id,
     )
 
 
@@ -915,9 +1274,9 @@ def get_order_operations(
 @track_tool
 @enforce_store_filter
 @enforce_staff_filter
-def get_staff_revenue(date_from: str, date_to: str, staff_name: str | None = None) -> dict:
+def get_staff_revenue(date_from: str, date_to: str, staff_name: str | None = None, staff_id: str | None = None, store_id: str | None = None) -> dict:
     """Xếp hạng nhân viên theo tổng giá trị đơn và số đơn phát hành trong kỳ."""
-    return query_staff_revenue(date_from, date_to, staff_name)
+    return query_staff_revenue(date_from, date_to, staff_name, staff_id, store_id)
 
 
 @mcp.tool()
@@ -1040,6 +1399,7 @@ def get_sales_by_customer_type(
 
 @mcp.tool()
 @track_tool
+@enforce_bod_hmk_customer_filter
 @enforce_store_filter
 def get_return_exchange_requests(
     date_from: str | None = None,
@@ -1051,16 +1411,18 @@ def get_return_exchange_requests(
     store_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    exclude_hmk_customers: bool = False,
 ) -> dict:
     """Tra cứu yêu cầu trả/đổi hàng, trạng thái, lý do và số tiền. Ngày theo giờ Việt Nam."""
     return query_return_exchange_requests(
         date_from, date_to, date_field, status, code, reason,
-        store_id, limit, offset,
+        store_id, limit, offset, exclude_hmk_customers,
     )
 
 
 @mcp.tool()
 @track_tool
+@enforce_bod_hmk_customer_filter
 @enforce_store_filter
 def get_return_orders(
     date_from: str | None = None,
@@ -1072,11 +1434,12 @@ def get_return_orders(
     store_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    exclude_hmk_customers: bool = False,
 ) -> dict:
     """Tra cứu ReturnOrder thực tế của màn Quản lý trả hàng, không phải ReturnOrderRequest."""
     return query_return_orders(
         date_from, date_to, date_field, state, code, customer,
-        store_id, limit, offset,
+        store_id, limit, offset, exclude_hmk_customers,
     )
 
 

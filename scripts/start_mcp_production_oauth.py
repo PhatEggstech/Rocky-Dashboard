@@ -348,6 +348,12 @@ async def login_page(request):
             error_display="none",
             error_message=""
         )
+        from mcp_server.portal_policy import enabled as portal_enabled
+        if portal_enabled():
+            from html import escape
+            portal_url='/portal/login?'+urlencode(params)
+            html=html.replace('<form method="POST" action="/login">',
+                '<p><a href="'+escape(portal_url,quote=True)+'">Sign in with your Rocky Dashboard account</a></p><form method="POST" action="/login">',1)
         return HTMLResponse(html)
 
     # POST - validate credentials
@@ -375,6 +381,10 @@ async def login_page(request):
 
     if result:
         api_key, user_id, role, name = result
+        from mcp_server.portal_policy import enabled as portal_enabled
+        if portal_enabled() and role != 'admin':
+            return RedirectResponse('/portal/login?'+urlencode({'redirect_uri':redirect_uri,'state':state,
+                'code_challenge':code_challenge,'code_challenge_method':code_challenge_method}),status_code=303)
         code = secrets.token_urlsafe(32)
         try:
             store_auth_code(code, user_id, api_key, redirect_uri, state, code_challenge)
@@ -427,6 +437,11 @@ async def oauth_token(request):
     if grant_type != "authorization_code":
         return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
 
+    from mcp_server.portal_policy import enabled as portal_enabled
+    if portal_enabled() and code.startswith('rkpc_'):
+        from mcp_server.portal_oauth import exchange_portal_code
+        return exchange_portal_code(form_data)
+
     try:
         result = exchange_auth_code(code)
     except AuthDatabaseUnavailable:
@@ -473,6 +488,12 @@ app.routes.insert(0, Route("/register", oauth_register, methods=["POST"]))
 app.routes.insert(0, Route("/authorize", oauth_authorize, methods=["GET"]))
 app.routes.insert(0, Route("/login", login_page, methods=["GET", "POST"]))
 app.routes.insert(0, Route("/token", oauth_token, methods=["POST"]))
+from mcp_server.portal_oauth import portal_login, portal_logout
+app.routes.insert(0, Route('/portal/login',portal_login,methods=['GET','POST']))
+app.routes.insert(0, Route('/portal/logout',portal_logout,methods=['POST']))
+from mcp_server.portal_uat import begin as portal_uat_begin, callback as portal_uat_callback
+app.routes.insert(0, Route('/portal/uat',portal_uat_begin,methods=['GET']))
+app.routes.insert(0, Route('/portal/uat/callback',portal_uat_callback,methods=['GET']))
 
 # Health check
 async def health_check(request):

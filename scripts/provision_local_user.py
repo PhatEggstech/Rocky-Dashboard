@@ -37,6 +37,17 @@ def main() -> None:
     parser.add_argument("--username", required=True)
     parser.add_argument("--role", required=True, choices=sorted(VALID_ROLES))
     parser.add_argument("--name", required=True)
+    parser.add_argument("--staff-id", help="POS employee UUID.")
+    parser.add_argument("--store-id", help="POS store UUID.")
+    parser.add_argument("--can-view-cost", action="store_true")
+    parser.add_argument("--include-hmk", action="store_true")
+    parser.add_argument("--warehouse-id", action="append", default=[], help="Permitted warehouse UUID. Repeat for each warehouse.")
+    parser.add_argument(
+        "--sale-zone-id",
+        action="append",
+        default=[],
+        help="POS SaleZone UUID. Repeat for each permitted ASM zone.",
+    )
     args = parser.parse_args()
 
     if MCP_AUTH_BACKEND != "sqlite":
@@ -57,6 +68,12 @@ def main() -> None:
         password=password,
         role=args.role,
         name=args.name,
+        staff_id=args.staff_id,
+        store_id=args.store_id,
+        sale_zone_ids=args.sale_zone_id,
+        can_view_cost=args.can_view_cost,
+        include_hmk=args.include_hmk,
+        warehouse_ids=args.warehouse_id,
     )
     clear_key_cache()
     print({"provisioned": True, "username": args.username, "role": args.role})

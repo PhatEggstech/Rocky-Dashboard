@@ -691,7 +691,7 @@ Từ `executive_dashboard/app/kpi_contract.py`:
 
 | Source | Connection | Tables Used | Incremental Column |
 |--------|-----------|-------------|-------------------|
-| POS PostgreSQL (pos_pg) | Private network via `POS_PG_DSN` | 21 bảng (xem Bronze) | `UpdateAt` (hoặc `CreatedAt` cho StockHistory) |
+| POS PostgreSQL (pos_pg) | VPN `10.39.93.19:5432` | 21 bảng (xem Bronze) | `UpdateAt` (hoặc `CreatedAt` cho StockHistory) |
 | ZNS PostgreSQL (zns_pg) | _(config)_ | Rating, ZaloMessage | `CreatedAt` / `SentAt` |
 | Manual targets | EDP SQLite | `monthly_targets` | Manual input (UI) |
 | Holidays | EDP SQLite | `holidays` | Manual/seed |

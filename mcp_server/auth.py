@@ -5,7 +5,8 @@ Roles:
 - admin: full access to all tools and all stores
 - manager: data tools filtered to their store_id only, no raw SQL
 - staff: personal data only (own sales, own picker stats), no raw SQL
-- bod: approved executive reports across all stores, no raw SQL or operations
+- bod: broad read-only operational access across all stores, except HMK customer
+  data and actions that could expose or contact those customers
 
 Usage:
   1. Middleware extracts Bearer token from Authorization header
@@ -19,7 +20,7 @@ import contextvars
 import functools
 import logging
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Callable
 
 import psycopg
@@ -38,13 +39,23 @@ logger = logging.getLogger("mcp_auth")
 @dataclass
 class UserContext:
     user_id: int
-    role: str           # "admin", "manager", "staff", "bod"
-    store_id: int | None  # None = all stores (admin / bod)
-    staff_id: int | None  # POS Staff.Id for staff role
+    role: str           # "admin", "manager", "staff", "bod", "asm"
+    store_id: str | int | None  # UUID; legacy integer identities remain readable
+    staff_id: str | int | None  # POS Staff.Id
     name: str
+    username: str = ""
+    sale_zone_ids: tuple[str, ...] = ()
+    warehouse_ids: tuple[str, ...] = ()
+    can_view_cost: bool = False
+    include_hmk: bool = False
+    all_sites: bool = False
+    portal_session: str = field(default='', repr=False)
+    rk_user_id: str = ''
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        result = asdict(self)
+        result.pop('portal_session', None)
+        return result
 
 
 # ContextVar holding current authenticated user (set per-request by middleware)
@@ -56,6 +67,67 @@ _current_user: contextvars.ContextVar[UserContext | None] = contextvars.ContextV
 def get_current_user() -> UserContext | None:
     """Get the current authenticated user from request context."""
     return _current_user.get()
+
+
+# BOD may use normal operational/KPI tools.  These exceptions are deliberately
+# enforced in code (not only in the AI prompt) because they can expose HMK
+# customer identity, per-customer commercial/debt data, or send notifications.
+_BOD_HMK_CUSTOMER_TOOLS = frozenset({
+    "get_debt",
+    "get_dashboard_debt_customers",
+    "get_customers",
+    "get_dashboard_sales_by_customer",
+    "get_top_bad_debts",
+    "get_vip_revenue_drop_alerts",
+    "get_telegram_mappings",
+    # get_orders is backed by a legacy aggregate table without a reliable
+    # Customer.Type field, so it cannot be filtered safely for BOD.
+    "get_orders",
+})
+_BOD_RAW_SQL_TOOLS = frozenset({
+    "query_raw_sql_tool",
+})
+_BOD_ACTION_TOOLS = frozenset({"trigger_debt_reminders"})
+_BOD_CUSTOMER_DASHBOARD_METRICS = frozenset({
+    "customer_overview",
+    "customer_by_province",
+    "customer_by_order",
+    "customer_birthday",
+    "customer_no_interaction",
+    "revenue_details",
+    "revenue_orders",
+    "revenue_return_orders",
+    "revenue_by_staff_details",
+    "revenue_by_product_details",
+})
+
+
+def is_bod_assistant(user: UserContext | None) -> bool:
+    """Whether this is the dedicated BOD assistant account, not a generic BOD/admin user."""
+    return bool(
+        user
+        and user.role == "bod"
+        and user.username.casefold() == "bod_assistant"
+    )
+
+
+def bod_access_decision(tool_name: str, args: tuple = (), kwargs: dict | None = None) -> tuple[bool, list[str], str]:
+    """Return whether a BOD-assistant request is allowed under the HMK policy."""
+    kwargs = kwargs or {}
+    if tool_name in _BOD_HMK_CUSTOMER_TOOLS:
+        alternatives = ["get_dashboard_order_overview", "get_dashboard_revenue"]
+        if "debt" in tool_name:
+            alternatives = ["get_dashboard_debt_overview"]
+        return False, alternatives, "HMK customer-level data is restricted for the BOD role."
+    if tool_name in _BOD_RAW_SQL_TOOLS:
+        return False, [], "Raw SQL is restricted because it can bypass HMK customer data controls."
+    if tool_name in _BOD_ACTION_TOOLS:
+        return False, [], "Operational notification actions are restricted for the BOD role."
+    if tool_name == "get_dashboard_metric":
+        metric = kwargs.get("metric") or (args[0] if args else None)
+        if metric in _BOD_CUSTOMER_DASHBOARD_METRICS:
+            return False, ["get_dashboard_order_overview", "get_dashboard_revenue"], "This Dashboard metric can expose HMK customer-level data."
+    return True, [], ""
 
 
 # ---------------------------------------------------------------------------
@@ -76,12 +148,18 @@ def _get_local_auth_store() -> LocalAuthStore:
 
 def _lookup_api_key(api_key: str) -> UserContext | None:
     """Lookup API key in database, with simple cache."""
+    from .portal_policy import enabled as portal_enabled
+    if portal_enabled():
+        from .portal_runtime import resolve_portal_user
+        portal_user = resolve_portal_user(api_key)
+        if portal_user is not None:
+            return portal_user
     now = time.time()
     
     # Check cache first
     if api_key in _key_cache:
         user, cached_at = _key_cache[api_key]
-        if now - cached_at < _CACHE_TTL:
+        if MCP_AUTH_BACKEND != 'sqlite' and now - cached_at < _CACHE_TTL:
             return user
         else:
             del _key_cache[api_key]
@@ -93,7 +171,12 @@ def _lookup_api_key(api_key: str) -> UserContext | None:
             if row:
                 user = UserContext(
                     user_id=row["id"], role=row["role"], store_id=row["store_id"],
-                    staff_id=row["staff_id"], name=row["name"],
+                    staff_id=row["staff_id"], name=row["name"], username=row["username"],
+                    sale_zone_ids=tuple(row.get("sale_zone_ids", ())),
+                    warehouse_ids=tuple(row.get("warehouse_ids", ())),
+                    can_view_cost=bool(row.get("can_view_cost", False)),
+                    include_hmk=bool(row.get("include_hmk", False)),
+                    all_sites=bool(row.get("all_sites", False)),
                 )
                 _key_cache[api_key] = (user, now)
                 return user
@@ -143,7 +226,7 @@ _PUBLIC_PATHS = {"/health", "/healthz", "/ping",
                  "/.well-known/openid-configuration",
                  "/.well-known/oauth-protected-resource",
                  "/.well-known/oauth-protected-resource/mcp",
-                 "/register", "/authorize", "/token", "/login"}
+                 "/register", "/authorize", "/token", "/login", "/portal/login", "/portal/uat", "/portal/uat/callback"}
 
 # Environment variable to disable auth (transition period)
 import os
@@ -178,6 +261,11 @@ class AuthMiddleware:
             user = _lookup_api_key(api_key)
 
             if user:
+                from .portal_policy import enabled as portal_enabled
+                if portal_enabled() and user.role != 'admin' and not user.portal_session:
+                    response = JSONResponse({'error':'Rocky Dashboard sign-in required','code':401},status_code=401)
+                    await response(scope,receive,send)
+                    return
                 # Set user context for this request
                 token = _current_user.set(user)
                 try:
@@ -238,6 +326,16 @@ def require_role(*allowed_roles: str):
             user = get_current_user()
             if user is None:
                 return {"error": "Authentication required", "code": 401}
+            if is_bod_assistant(user):
+                allowed, alternatives, reason = bod_access_decision(func.__name__, args, kwargs)
+                if not allowed:
+                    return {
+                        "error": f"Permission denied. {reason}",
+                        "code": 403,
+                        "user": user.name,
+                        "alternatives": alternatives,
+                    }
+                return func(*args, **kwargs)
             if user.role not in allowed_roles:
                 return {
                     "error": f"Permission denied. Your role '{user.role}' cannot access this tool. Required: {list(allowed_roles)}",
@@ -265,8 +363,24 @@ def enforce_store_filter(func: Callable):
     def wrapper(*args, **kwargs):
         user = get_current_user()
         if user and user.role != 'admin' and user.store_id is not None:
-            # Force store_id filter for non-admin
-            kwargs['store_id'] = str(user.store_id)
+            import inspect
+            signature = inspect.signature(func)
+            if 'store_id' not in signature.parameters:
+                return {"error": "Tool does not implement branch scope", "code": 403}
+            bound = signature.bind_partial(*args, **kwargs)
+            bound.arguments['store_id'] = str(user.store_id)
+            return func(*bound.args, **bound.kwargs)
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def enforce_bod_hmk_customer_filter(func: Callable):
+    """Exclude Customer.IsHmkCustomer = TRUE rows for BOD-assistant views."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        user = get_current_user()
+        if is_bod_assistant(user):
+            kwargs["exclude_hmk_customers"] = True
         return func(*args, **kwargs)
     return wrapper
 
@@ -284,7 +398,13 @@ def enforce_staff_filter(func: Callable):
     def wrapper(*args, **kwargs):
         user = get_current_user()
         if user and user.role == 'staff':
-            kwargs['staff_name'] = user.name
+            if not user.staff_id:
+                return {"error": "Staff account has no employee mapping", "code": 403}
+            import inspect
+            bound = inspect.signature(func).bind_partial(*args, **kwargs)
+            bound.arguments['staff_id'] = str(user.staff_id)
+            bound.arguments['staff_name'] = None
+            return func(*bound.args, **bound.kwargs)
         return func(*args, **kwargs)
     return wrapper
 

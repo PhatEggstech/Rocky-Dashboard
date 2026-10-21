@@ -57,7 +57,7 @@ Database Gold Layer (`rocky_dashboard` trên `localhost:5432`) lưu trữ dữ l
 
 ---
 
-## 2. Cấu trúc Database POS Gốc (Database `rocky_stg` qua `POS_PG_DSN`)
+## 2. Cấu trúc Database POS Gốc (Database `rocky_stg` trên `10.39.93.117`)
 
 Khi cần tính toán các chỉ số chi tiết chưa được tổng hợp trong Gold Layer, AI có thể viết câu lệnh SQL truy cập trực tiếp các bảng nguồn của POS.
 

@@ -1,0 +1,17 @@
+<service>
+  <id>RockyMCPIngress</id>
+  <name>Rocky MCP HTTPS Ingress</name>
+  <description>Cloudflare HTTPS ingress for the Rocky MCP server</description>
+  <executable>C:\Program Files (x86)\cloudflared\cloudflared.exe</executable>
+  <arguments>tunnel --no-autoupdate --url http://127.0.0.1:8085 --logfile C:\ProgramData\RockyMCP\logs\cloudflared.log --loglevel info</arguments>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <onfailure action="restart" delay="10 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>20 sec</stoptimeout>
+  <logpath>C:\ProgramData\RockyMCP\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>8</keepFiles>
+  </log>
+</service>

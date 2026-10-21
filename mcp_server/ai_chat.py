@@ -13,6 +13,7 @@ from .tools import (
     query_revenue,
     query_subtotal,
     query_debt,
+    query_customer_debt_profile,
     query_staff_revenue,
     query_orders,
     query_order_operations,
@@ -230,6 +231,7 @@ TOOL_FUNCTIONS = {
     "get_revenue_legacy": query_revenue,
     "get_subtotal": query_subtotal,
     "get_debt": query_debt,
+    "get_customer_debt_profile": query_customer_debt_profile,
     "get_staff_revenue": query_staff_revenue,
     "get_orders": query_orders,
     "get_order_operations": query_order_operations,
@@ -269,6 +271,7 @@ QUAN TRỌNG:
 - KHÔNG giải thích, KHÔNG hỏi lại. Gọi tool NGAY.
 - Routing BOD: câu hỏi có KPI/màn Dashboard tương ứng phải dùng tool get_dashboard_*. Câu hỏi vận hành, kho/WMS, phân tích POS/B2B hoặc KPI không có trong Dashboard phải dùng tool cũ phù hợp. Không thay thế một Dashboard KPI bằng số tự tính từ tool cũ. Nếu Dashboard API lỗi, nêu lỗi nguồn; chỉ fallback tool cũ khi câu hỏi vốn nằm ngoài phạm vi Dashboard.
 - Câu hỏi chưa có tool: gọi search_schema trước. Không tự viết SQL POS hay suy đoán bảng/cột khi chưa có schema retrieval.
+- Hồ sơ công nợ một khách theo mã: bắt buộc gọi get_customer_debt_profile. Không được dùng raw SQL để ghép Order.LeftAmount với CustomerCashDebt hay suy diễn ý định thanh toán.
 
 ## Tools:
 1. get_revenue(date_from, date_to, store_id?) — Alias Dashboard bắt buộc cho câu hỏi doanh số; khớp trang Doanh số Rocky Lens
@@ -279,6 +282,7 @@ QUAN TRỌNG:
 6. get_dashboard_metric(metric, date_from?, date_to?, relative_period?, ...) — metric Dashboard read-only mở rộng: đơn theo thời gian/nhân viên/trạng thái; chi tiết doanh thu; doanh thu theo nhân viên/hàng; khách hàng; sản phẩm; picker/app picker.
 7. get_dashboard_debt_overview(date_from?, date_to?, relative_period?, customer_ids?, payment_method_ids?) — Công nợ đúng giao diện Dashboard: số dư đầu kỳ, phát sinh, đã thu, tỷ lệ thu hồi.
 8. get_dashboard_debt_customers(date_from?, date_to?, relative_period?, customer_ids?, page?, size?) — Danh sách khách công nợ Dashboard có phân trang.
+9. get_customer_debt_profile(customer_code) — Hồ sơ công nợ một mã khách; tách ORDER_COMPLETED, ORDER_CONFIRMED và CustomerCashDebt, không suy diễn hành vi.
 4. get_revenue_legacy(date_from, date_to, store_id?) — [LEGACY] cohort POS để đối soát công thức cũ, không dùng cho UI
 5. get_subtotal(date_from, date_to, store_id?) — Doanh số NET đã trừ đơn trả, tách HMK/Khác
 3. get_debt(customer_name?, date_from?, date_to?) — Công nợ B2B
@@ -388,6 +392,22 @@ TOOLS_SCHEMA = [
     {
         "type": "function",
         "function": {
+            "name": "get_revenue_legacy",
+            "description": "Đối soát doanh thu cohort POS cũ theo khoảng thời gian; không dùng thay số Dashboard UI.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date_from": {"type": "string", "description": "Ngày bắt đầu YYYY-MM-DD"},
+                    "date_to": {"type": "string", "description": "Ngày kết thúc YYYY-MM-DD"},
+                    "store_id": {"type": "string", "description": "ID cửa hàng (optional)"},
+                },
+                "required": ["date_from", "date_to"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_subtotal",
             "description": "Lấy doanh số (giá trị hàng hóa, không ship) theo khoảng thời gian",
             "parameters": {
@@ -413,6 +433,20 @@ TOOLS_SCHEMA = [
                     "date_from": {"type": "string", "description": "Từ ngày YYYY-MM-DD"},
                     "date_to": {"type": "string", "description": "Đến ngày YYYY-MM-DD"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_customer_debt_profile",
+            "description": "Hồ sơ công nợ một khách theo mã; tách đơn hoàn tất, đơn xác nhận và CustomerCashDebt.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "customer_code": {"type": "string", "description": "Mã khách hàng"},
+                },
+                "required": ["customer_code"],
             },
         },
     },
@@ -795,11 +829,21 @@ def _strip_thinking(text: str) -> str:
     return re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
 
 
-def chat_ollama(user_message: str, history: list | None = None) -> str:
+def chat_ollama(
+    user_message: str,
+    history: list | None = None,
+    allowed_tools: set[str] | None = None,
+) -> str:
     """Chat using Ollama (prompt-based tool calling)."""
     client = create_client()
 
     system = SYSTEM_PROMPT + "\n" + TOOLS_PROMPT
+    if allowed_tools is not None:
+        system += (
+            "\n\nKênh hiện tại chỉ cho phép các tool sau: "
+            + ", ".join(sorted(allowed_tools))
+            + ". Không được gọi hoặc mô tả tool khác."
+        )
     messages = [{"role": "system", "content": system}]
     if history:
         messages.extend(history)
@@ -822,7 +866,7 @@ def chat_ollama(user_message: str, history: list | None = None) -> str:
     # Execute tool
     fn_name = tool_call["name"]
     fn_args = tool_call.get("args", {})
-    fn = TOOL_FUNCTIONS.get(fn_name)
+    fn = TOOL_FUNCTIONS.get(fn_name) if allowed_tools is None or fn_name in allowed_tools else None
 
     if fn:
         try:
@@ -846,11 +890,22 @@ def chat_ollama(user_message: str, history: list | None = None) -> str:
     return _strip_thinking(final)
 
 
-def chat_openrouter(user_message: str, history: list | None = None) -> str:
+def chat_openrouter(
+    user_message: str,
+    history: list | None = None,
+    allowed_tools: set[str] | None = None,
+) -> str:
     """Chat using OpenRouter (native function calling)."""
     client = create_client()
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system = SYSTEM_PROMPT
+    if allowed_tools is not None:
+        system += (
+            "\nKênh hiện tại chỉ được dùng các tool: "
+            + ", ".join(sorted(allowed_tools))
+            + "."
+        )
+    messages = [{"role": "system", "content": system}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user_message})
@@ -858,7 +913,10 @@ def chat_openrouter(user_message: str, history: list | None = None) -> str:
     response = client.chat.completions.create(
         model=AI_MODEL,
         messages=messages,
-        tools=TOOLS_SCHEMA,
+        tools=[
+            item for item in TOOLS_SCHEMA
+            if allowed_tools is None or item["function"]["name"] in allowed_tools
+        ],
         tool_choice="auto",
     )
 
@@ -873,7 +931,7 @@ def chat_openrouter(user_message: str, history: list | None = None) -> str:
         fn_name = tool_call.function.name
         fn_args = json.loads(tool_call.function.arguments)
 
-        fn = TOOL_FUNCTIONS.get(fn_name)
+        fn = TOOL_FUNCTIONS.get(fn_name) if allowed_tools is None or fn_name in allowed_tools else None
         if fn:
             try:
                 result = execute_tool_safely(fn, fn_args)
@@ -897,9 +955,12 @@ def chat_openrouter(user_message: str, history: list | None = None) -> str:
     return response2.choices[0].message.content or "(no response)"
 
 
-def chat(user_message: str, history: list | None = None) -> str:
+def chat(
+    user_message: str,
+    history: list | None = None,
+    allowed_tools: set[str] | None = None,
+) -> str:
     """Chat with AI — auto-selects mode based on provider."""
     if AI_PROVIDER == "ollama":
-        return chat_ollama(user_message, history)
-    else:
-        return chat_openrouter(user_message, history)
+        return chat_ollama(user_message, history, allowed_tools)
+    return chat_openrouter(user_message, history, allowed_tools)

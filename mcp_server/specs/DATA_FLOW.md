@@ -314,7 +314,7 @@ flowchart TB
             AIR["airflow\n:8080 internal\n:8081 host"]
             INIT["datalake-init / -run\n(one-shot)"]
         end
-        POSEXT[("Private network ⇒ POS PG\nPOS_PG_DSN")]
+        POSEXT[("VPN ⇒ POS PG\n10.39.93.19:5432")]
         VOLAPI[(executive_dashboard/data\nSQLite volume)]
         VOLWH[(warehouse_data vol)]
         VOLMIN[(minio_data vol)]

@@ -19,6 +19,8 @@ from .config import (
 
 def _get_conn():
     """Get dashboard PG connection."""
+    from .portal_policy import require_sql_admin
+    require_sql_admin()
     if not DASHBOARD_PG_DSN:
         raise RuntimeError("DASHBOARD_PG_DSN is not configured")
     return psycopg.connect(DASHBOARD_PG_DSN, connect_timeout=10)
@@ -26,6 +28,8 @@ def _get_conn():
 
 def _get_pos_conn():
     """Get POS PG connection (remote) with statement timeout."""
+    from .portal_policy import require_sql_admin
+    require_sql_admin()
     if not POS_PG_DSN:
         raise RuntimeError("POS_PG_DSN is not configured")
     return psycopg.connect(POS_PG_DSN, connect_timeout=15,
@@ -125,7 +129,7 @@ SCHEMA_QUICK_CONTEXT = {
         "PaymentOrderItem": "Dòng thanh toán; nối PaymentOrderId và OrderId; PaidAmount là số tiền dòng.",
         "ReturnOrder": "Đơn trả; không tự trừ hai lần nếu tool đã trả NET.",
         "Warehouse": "Nối Order.WarehouseId sang SiteId/chi nhánh.",
-        "Customer": "Nối Order.CustomerId; Type=1 là HMK theo contract hiện hữu.",
+        "Customer": "Nối Order.CustomerId; IsHmkCustomer=TRUE là HMK/B2B, FALSE hoặc NULL là khách lẻ.",
     },
     "mandatory_rules": [
         "Chuyển timestamp sang Asia/Ho_Chi_Minh trước khi lọc/group theo ngày.",
@@ -181,7 +185,7 @@ def query_revenue(date_from: str, date_to: str, store_id: str | None = None) -> 
                     (o."IssueAt" AT TIME ZONE 'Asia/Ho_Chi_Minh')::date::text AS d,
                     COALESCE(w."SiteId", o."WarehouseId")::text AS site_id,
                     COALESCE(s."Name", 'Unknown') AS store_name,
-                    CASE WHEN c."Type" = 1 THEN TRUE ELSE FALSE END AS is_hmk,
+                    COALESCE(c."IsHmkCustomer", FALSE) AS is_hmk,
                     COALESCE(o."TotalAmount"::numeric, 0) AS order_value
                 FROM "Order" o
                 LEFT JOIN "Warehouse" w ON w."Id" = o."WarehouseId"
@@ -640,6 +644,7 @@ def query_return_exchange_requests(
     store_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    exclude_hmk_customers: bool = False,
 ) -> dict:
     """List return/exchange requests directly from the POS workflow."""
     date_columns = {
@@ -691,6 +696,8 @@ def query_return_exchange_requests(
     if store_id:
         conditions.append('w."SiteId" = %s')
         params.append(store_id)
+    if exclude_hmk_customers:
+        conditions.append('COALESCE(c."IsHmkCustomer", FALSE) = FALSE')
 
     where = " AND ".join(conditions)
     joins = """
@@ -844,6 +851,9 @@ def query_order_operations(
     store_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    exclude_hmk_customers: bool = False,
+    sale_zone_ids: list[str] | None = None,
+    assigned_staff_id: str | None = None,
 ) -> dict:
     """List active POS orders and the same monetary totals as the order UI.
 
@@ -882,6 +892,14 @@ def query_order_operations(
     if store_id:
         conditions.append('w."SiteId"::text = %s')
         params.append(str(store_id))
+    if sale_zone_ids:
+        conditions.append('o."SaleZoneId"::text = ANY(%s)')
+        params.append(list(dict.fromkeys(str(value) for value in sale_zone_ids)))
+    if assigned_staff_id:
+        conditions.append('c."RevenueStaffId"::text = %s AND c."DeleteAt" IS NULL')
+        params.append(str(assigned_staff_id))
+    if exclude_hmk_customers:
+        conditions.append('COALESCE(c."IsHmkCustomer", FALSE) = FALSE')
 
     where = " AND ".join(conditions)
     joins = """
@@ -1004,6 +1022,7 @@ def query_order_operations(
             "code": code,
             "customer": customer,
             "store_id": store_id,
+            "sale_zone_ids": sale_zone_ids or [],
             "active_only": True,
         },
         "summary": {
@@ -1040,6 +1059,7 @@ def query_return_orders(
     store_id: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    exclude_hmk_customers: bool = False,
 ) -> dict:
     """List actual return orders from POS ReturnOrder, not workflow requests."""
     date_columns = {
@@ -1070,6 +1090,8 @@ def query_return_orders(
     if store_id:
         conditions.append('w."SiteId"::text = %s')
         params.append(str(store_id))
+    if exclude_hmk_customers:
+        conditions.append('COALESCE(c."IsHmkCustomer", FALSE) = FALSE')
 
     where = " AND ".join(conditions)
     joins = """
@@ -1281,11 +1303,234 @@ def query_debt(customer_name: str | None = None, date_from: str | None = None, d
         conn.close()
 
 
+def query_customer_debt_profile(customer_code: str) -> dict:
+    """Return a reconciliation-safe debt profile for one exact POS customer code.
+
+    This deliberately separates the operational order cohorts from the
+    CustomerCashDebt ledger.  It does not infer a customer's payment intent.
+    """
+    normalized_code = (customer_code or "").strip()
+    if not normalized_code:
+        raise ValueError("customer_code is required")
+
+    conn = _get_pos_conn()
+    try:
+        snapshot_at = conn.execute("SELECT CURRENT_TIMESTAMP").fetchone()[0]
+        snapshot_at = snapshot_at.astimezone(ZoneInfo("Asia/Ho_Chi_Minh")).isoformat()
+
+        cur = conn.execute(
+            '''
+            SELECT c."Id", c."Code", c."Name", c."IsHmkCustomer", c."IsEnableDebt"
+            FROM "Customer" c
+            WHERE UPPER(c."Code") = UPPER(%s)
+            LIMIT 2
+            ''',
+            [normalized_code],
+        )
+        customers = cur.fetchall()
+        if not customers:
+            return {
+                "metric": "ho_so_cong_no_khach_hang",
+                "customer_code": normalized_code,
+                "found": False,
+                "data_as_of": snapshot_at,
+                "timezone": "Asia/Ho_Chi_Minh",
+                "note": "Không tìm thấy khách hàng theo mã chính xác.",
+            }
+        if len(customers) > 1:
+            raise RuntimeError("Customer code is not unique; reconciliation cannot continue")
+
+        customer_id, code, name, is_hmk, debt_enabled = customers[0]
+        cur = conn.execute(
+            '''
+            SELECT "NeedPayAmount", "PaidAmount", "LeftAmount", "CurrentDebtAmount",
+                   "UnallocatedAmount", "PaymentState", "DueAt", "PaymentAt", "UpdateAt"
+            FROM "CustomerCashDebt"
+            WHERE "CustomerId" = %s AND "DeleteAt" IS NULL
+            ORDER BY "UpdateAt" DESC NULLS LAST, "CreateAt" DESC
+            LIMIT 1
+            ''',
+            [customer_id],
+        )
+        cash_debt = cur.fetchone()
+
+        cur = conn.execute(
+            '''
+            WITH valid_orders AS (
+                SELECT
+                    o."Id", o."IssueAt", o."LeftAmount"::numeric AS left_amount,
+                    ws."Code" AS state_code
+                FROM "Order" o
+                LEFT JOIN "WorkflowState" ws ON ws."Id" = o."StateId"
+                WHERE o."CustomerId" = %s
+                  AND o."DeleteAt" IS NULL
+                  AND o."CancelAt" IS NULL
+                  AND o."ApproveAt" IS NOT NULL
+                  AND o."Type" IN (1, 2)
+            )
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE state_code = 'ORDER_COMPLETED' AND left_amount > 0
+                )::int AS completed_orders_with_left,
+                COALESCE(SUM(left_amount) FILTER (
+                    WHERE state_code = 'ORDER_COMPLETED' AND left_amount > 0
+                ), 0) AS completed_left_amount,
+                COUNT(*) FILTER (
+                    WHERE state_code = 'ORDER_CONFIRMED' AND left_amount > 0
+                )::int AS confirmed_orders_with_left,
+                COALESCE(SUM(left_amount) FILTER (
+                    WHERE state_code = 'ORDER_CONFIRMED' AND left_amount > 0
+                ), 0) AS confirmed_left_amount,
+                COUNT(*) FILTER (
+                    WHERE state_code NOT IN ('ORDER_COMPLETED', 'ORDER_CONFIRMED')
+                      AND left_amount > 0
+                )::int AS other_active_orders_with_left,
+                COALESCE(SUM(left_amount) FILTER (
+                    WHERE state_code NOT IN ('ORDER_COMPLETED', 'ORDER_CONFIRMED')
+                      AND left_amount > 0
+                ), 0) AS other_active_left_amount
+            FROM valid_orders
+            ''',
+            [customer_id],
+        )
+        order_summary = cur.fetchone()
+
+        cur = conn.execute(
+            '''
+            SELECT
+                to_char((o."IssueAt" AT TIME ZONE 'Asia/Ho_Chi_Minh'), 'YYYY') AS year,
+                COUNT(*)::int AS orders,
+                COALESCE(SUM(o."LeftAmount"::numeric), 0) AS left_amount
+            FROM "Order" o
+            JOIN "WorkflowState" ws ON ws."Id" = o."StateId"
+            WHERE o."CustomerId" = %s
+              AND o."DeleteAt" IS NULL
+              AND o."CancelAt" IS NULL
+              AND o."ApproveAt" IS NOT NULL
+              AND o."Type" IN (1, 2)
+              AND ws."Code" = 'ORDER_COMPLETED'
+              AND o."LeftAmount"::numeric > 0
+            GROUP BY 1
+            ORDER BY 1
+            ''',
+            [customer_id],
+        )
+        completed_by_year = [
+            {
+                "year": row[0],
+                "orders": int(row[1] or 0),
+                "left_amount": round(float(row[2] or 0), 0),
+            }
+            for row in cur.fetchall()
+        ]
+
+        cur = conn.execute(
+            '''
+            SELECT
+                COUNT(*)::int AS cancelled_orders_with_left,
+                COALESCE(SUM(o."LeftAmount"::numeric), 0) AS cancelled_left_amount
+            FROM "Order" o
+            WHERE o."CustomerId" = %s
+              AND o."DeleteAt" IS NULL
+              AND o."CancelAt" IS NOT NULL
+              AND o."LeftAmount"::numeric > 0
+            ''',
+            [customer_id],
+        )
+        cancelled = cur.fetchone()
+
+        cur = conn.execute(
+            '''
+            SELECT
+                COUNT(*)::int AS completed_return_orders,
+                COALESCE(SUM(ro."TotalAmount"::numeric), 0) AS completed_return_amount
+            FROM "ReturnOrder" ro
+            WHERE ro."CustomerId" = %s
+              AND ro."DeleteAt" IS NULL
+              AND ro."CancelAt" IS NULL
+              AND ro."CompleteAt" IS NOT NULL
+            ''',
+            [customer_id],
+        )
+        returns = cur.fetchone()
+    finally:
+        conn.close()
+
+    cash_debt_summary = None
+    if cash_debt:
+        cash_debt_summary = {
+            "need_pay_amount": round(float(cash_debt[0] or 0), 0),
+            "paid_amount": round(float(cash_debt[1] or 0), 0),
+            "left_amount": round(float(cash_debt[2] or 0), 0),
+            "current_debt_amount": round(float(cash_debt[3] or 0), 0),
+            "unallocated_amount": round(float(cash_debt[4] or 0), 0),
+            "payment_state": cash_debt[5],
+            "due_at": cash_debt[6],
+            "payment_at": cash_debt[7],
+            "updated_at": cash_debt[8],
+        }
+
+    completed_left_amount = round(float(order_summary[1] or 0), 0)
+    return {
+        "metric": "ho_so_cong_no_khach_hang",
+        "formula_version": "customer-debt-profile-v1-completed-separated",
+        "found": True,
+        "data_as_of": snapshot_at,
+        "timezone": "Asia/Ho_Chi_Minh",
+        "customer": {
+            "code": code,
+            "name": _anonymize_name(name),
+            "is_hmk_customer": bool(is_hmk),
+            "is_enable_debt": bool(debt_enabled),
+        },
+        "delivered_outstanding": {
+            "orders": int(order_summary[0] or 0),
+            "left_amount": completed_left_amount,
+            "definition": (
+                "Order.State WorkflowState.Code = ORDER_COMPLETED; "
+                "DeleteAt IS NULL, CancelAt IS NULL, ApproveAt IS NOT NULL, Type IN (1,2), LeftAmount > 0."
+            ),
+            "by_issue_year": completed_by_year,
+        },
+        "confirmed_not_delivered": {
+            "orders": int(order_summary[2] or 0),
+            "left_amount": round(float(order_summary[3] or 0), 0),
+            "definition": "WorkflowState.Code = ORDER_CONFIRMED; reported separately and never labelled delivered debt.",
+        },
+        "other_active_outstanding": {
+            "orders": int(order_summary[4] or 0),
+            "left_amount": round(float(order_summary[5] or 0), 0),
+        },
+        "cash_debt_ledger": cash_debt_summary,
+        "excluded_cancelled_orders": {
+            "orders": int(cancelled[0] or 0),
+            "left_amount": round(float(cancelled[1] or 0), 0),
+        },
+        "completed_returns_reference": {
+            "orders": int(returns[0] or 0),
+            "amount": round(float(returns[1] or 0), 0),
+            "note": "Reference only; not subtracted again from Order.LeftAmount.",
+        },
+        "reconciliation": {
+            "required": cash_debt_summary is not None and cash_debt_summary["left_amount"] != completed_left_amount,
+            "rule": (
+                "CustomerCashDebt ledger and completed-order LeftAmount are different accounting views. "
+                "Do not assert they are equal or derive payment behavior from their difference."
+            ),
+        },
+        "answer_guardrails": [
+            "Không gọi ORDER_CONFIRMED là đơn đã giao hoặc nợ đã giao.",
+            "Không suy diễn khách cố tình treo nợ/trốn nợ từ số liệu POS.",
+            "Nếu ledger và đơn hoàn thành khác nhau, yêu cầu Kế toán đối soát chứng từ thanh toán trước khi kết luận.",
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Tool 4: Doanh thu nhân viên (Staff Revenue)
 # ---------------------------------------------------------------------------
 
-def query_staff_revenue(date_from: str, date_to: str, staff_name: str | None = None) -> dict:
+def query_staff_revenue(date_from: str, date_to: str, staff_name: str | None = None, staff_id: str | None = None, store_id: str | None = None) -> dict:
     """Query dashboard staff ranking directly from valid POS orders."""
     conn = _get_pos_conn()
     try:
@@ -1294,6 +1539,12 @@ def query_staff_revenue(date_from: str, date_to: str, staff_name: str | None = N
         if staff_name:
             name_filter = 'AND s."Name" ILIKE %s'
             params.append(f"%{staff_name}%")
+        if staff_id:
+            name_filter += ' AND s."Id"::text = %s'
+            params.append(str(staff_id))
+        if store_id:
+            name_filter += ' AND EXISTS (SELECT 1 FROM "Warehouse" scope_w WHERE scope_w."Id" = o."WarehouseId" AND scope_w."SiteId"::text = %s AND scope_w."DeleteAt" IS NULL)'
+            params.append(str(store_id))
 
         cur = conn.execute(
             f"""
@@ -1334,6 +1585,8 @@ def query_staff_revenue(date_from: str, date_to: str, staff_name: str | None = N
 
         return {
             "metric": "doanh_thu_nhan_vien",
+            "effective_staff_id": staff_id,
+            "effective_store_id": store_id,
             "period": f"{date_from} to {date_to}",
             "staff": staff,
             "total_revenue": round(total_rev, 0),
@@ -1557,6 +1810,7 @@ def query_customer_sales(
     page_size: int = 20,
     order_type: int | None = None,
     store_id: str | None = None,
+    exclude_hmk_customers: bool = False,
 ) -> dict:
     """Query the Rocky Lens customer-sales list and Top-N overview."""
     start_date = date.fromisoformat(date_from)
@@ -1585,6 +1839,8 @@ def query_customer_sales(
         return_filters.append('return_w."SiteId" = %s')
         order_params.append(store_id)
         return_params.append(store_id)
+    hmk_filter = 'AND COALESCE(order_customer."IsHmkCustomer", FALSE) = FALSE' if exclude_hmk_customers else ''
+    return_hmk_filter = 'AND COALESCE(return_customer."IsHmkCustomer", FALSE) = FALSE' if exclude_hmk_customers else ''
 
     conn = _get_pos_conn()
     try:
@@ -1597,6 +1853,7 @@ def query_customer_sales(
                     COALESCE(SUM(o."ProductAmount"::numeric), 0) AS order_revenue
                 FROM "Order" o
                 LEFT JOIN "Warehouse" w ON w."Id" = o."WarehouseId"
+                LEFT JOIN "Customer" order_customer ON order_customer."Id" = o."CustomerId"
                 WHERE o."DeleteAt" IS NULL
                   AND o."CancelAt" IS NULL
                   AND o."ApproveAt" IS NOT NULL
@@ -1608,6 +1865,7 @@ def query_customer_sales(
                       (%s::date + 1)::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh'
                   )
                   AND {' AND '.join(order_filters)}
+                  {hmk_filter}
                 GROUP BY o."CustomerId"
             ),
             return_sales AS (
@@ -1620,6 +1878,8 @@ def query_customer_sales(
                   ON original_order."Id" = ro."OriginalOrderId"
                 LEFT JOIN "Warehouse" return_w
                   ON return_w."Id" = original_order."WarehouseId"
+                LEFT JOIN "Customer" return_customer
+                  ON return_customer."Id" = original_order."CustomerId"
                 WHERE ro."DeleteAt" IS NULL
                   AND ro."CompleteAt" IS NOT NULL
                   AND original_order."CustomerId" IS NOT NULL
@@ -1630,6 +1890,7 @@ def query_customer_sales(
                       (%s::date + 1)::timestamp AT TIME ZONE 'Asia/Ho_Chi_Minh'
                   )
                   AND {' AND '.join(return_filters)}
+                  {return_hmk_filter}
                 GROUP BY original_order."CustomerId"
             )
             SELECT
@@ -1725,6 +1986,7 @@ def query_customer_sales(
             "filters": {
                 "order_type": order_type or 0,
                 "store_id": store_id,
+                "exclude_hmk_customers": exclude_hmk_customers,
             },
             "unit": "VND",
             "formula": (
@@ -1932,7 +2194,7 @@ METRIC_EXPLANATIONS = {
         "definition": "Số dư nợ khách B2B theo ngày",
         "formula": "CurrentBalance = PreviousBalance + DebtAmount - TotalReceiveAmount + TotalPaymentAmount",
         "source": "DebtReport table (daily snapshot per customer)",
-        "note": "Âm = khách nợ. Customer.Type = 1 là đại lý B2B",
+        "note": "Âm = khách nợ. Phân loại HMK/B2B dùng Customer.IsHmkCustomer, không dùng Customer.Type.",
     },
     "order_type": {
         "name": "Loại đơn hàng",
@@ -2049,6 +2311,103 @@ def query_raw_pos_sql(sql: str) -> dict:
         }
     except Exception as e:
         return {"error": f"Lỗi truy vấn SQL POS: {str(e)}"}
+    finally:
+        conn.close()
+
+
+_BOD_RETAIL_POS_RELATIONS = frozenset({
+    "bod_retail_customers",
+    "bod_retail_orders",
+    "bod_retail_returns",
+    "bod_retail_order_items",
+    "bod_retail_order_item_groups",
+})
+_SQL_RELATION_RE = re.compile(r'\b(?:from|join)\s+"?([A-Za-z_][A-Za-z0-9_]*)"?', re.IGNORECASE)
+
+
+def _validate_bod_retail_pos_sql(sql: str) -> str | None:
+    """Validate the restricted SQL dialect exposed to ``bod_assistant``."""
+    validation_error = validate_read_only_sql(sql)
+    if validation_error:
+        return validation_error
+    code = _sql_code_without_literals_or_comments(sql).strip()
+    if re.match(r"^with\b", code, flags=re.IGNORECASE):
+        return "BOD raw POS chỉ hỗ trợ SELECT trực tiếp từ các relation bod_retail_*; không hỗ trợ CTE."
+    relations = {match.casefold() for match in _SQL_RELATION_RE.findall(code)}
+    if not relations:
+        return "BOD raw POS phải có FROM hoặc JOIN vào relation bod_retail_* được cấp quyền."
+    disallowed = relations - _BOD_RETAIL_POS_RELATIONS
+    if disallowed:
+        return (
+            "BOD raw POS chỉ được dùng relation đã lọc HMK: "
+            + ", ".join(sorted(_BOD_RETAIL_POS_RELATIONS))
+            + ". Relation bị từ chối: " + ", ".join(sorted(disallowed))
+        )
+    return None
+
+
+def _bod_retail_pos_query(sql: str) -> str:
+    """Build temporary POS relations which never include IsHmkCustomer=TRUE."""
+    return f'''
+        WITH
+        bod_retail_customers AS (
+            SELECT c.* FROM "Customer" c
+            WHERE COALESCE(c."IsHmkCustomer", FALSE) = FALSE
+        ),
+        bod_retail_orders AS (
+            SELECT o.* FROM "Order" o
+            JOIN bod_retail_customers c ON c."Id" = o."CustomerId"
+        ),
+        bod_retail_returns AS (
+            SELECT r.* FROM "ReturnOrder" r
+            JOIN bod_retail_orders o ON o."Id" = r."OriginalOrderId"
+        ),
+        bod_retail_order_item_groups AS (
+            SELECT g.* FROM "OrderItemGroup" g
+            JOIN bod_retail_orders o ON o."Id" = g."OrderId"
+        ),
+        bod_retail_order_items AS (
+            SELECT i.* FROM "OrderItem" i
+            JOIN bod_retail_order_item_groups g ON g."Id" = i."OrderItemGroupId"
+        )
+        SELECT * FROM ({sql.rstrip().rstrip(';')}) AS "_bod_retail_query" LIMIT 101
+    '''
+
+
+def query_bod_retail_pos_sql(sql: str) -> dict:
+    """Execute bounded POS SQL through retail-only temporary relations for BOD."""
+    from decimal import Decimal
+
+    validation_error = _validate_bod_retail_pos_sql(sql)
+    if validation_error:
+        return {"error": validation_error, "code": 403, "source": "pos_retail_gateway"}
+    conn = _get_pos_conn()
+    try:
+        cur = conn.execute(_bod_retail_pos_query(sql))
+        colnames = [desc[0] for desc in cur.description]
+        rows = cur.fetchall()
+        results = []
+        for row in rows[:100]:
+            formatted = []
+            for value in row:
+                if isinstance(value, Decimal):
+                    formatted.append(float(value))
+                elif hasattr(value, "hex"):
+                    formatted.append(str(value))
+                else:
+                    formatted.append(value)
+            results.append(dict(zip(colnames, formatted)))
+        return {
+            "metric": "raw_pos_sql",
+            "source": "pos_retail_gateway",
+            "rows": results,
+            "count": len(results),
+            "truncated": len(rows) > 100,
+            "hmk_excluded_by": "Customer.IsHmkCustomer = TRUE",
+            "allowed_relations": sorted(_BOD_RETAIL_POS_RELATIONS),
+        }
+    except Exception as error:
+        return {"error": f"Lỗi truy vấn POS retail gateway: {str(error)}", "source": "pos_retail_gateway"}
     finally:
         conn.close()
 

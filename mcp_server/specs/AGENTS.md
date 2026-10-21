@@ -135,7 +135,7 @@ cd executive_dashboard_frontend && npx tsc --noEmit
 
 | Source | Connection | Usage |
 |--------|-----------|-------|
-| POS PostgreSQL | `POS_PG_DSN` (private network) | 21 tables extracted |
+| POS PostgreSQL | `POS_PG_DSN` (VPN 10.39.93.19:5432) | 21 tables extracted |
 | ZNS PostgreSQL | `ZNS_PG_DSN` (optional) | CSAT ratings |
 | Warehouse PG | `WAREHOUSE_PG_DSN` (localhost:5433) | Gold layer serving |
 | SQLite | `executive_dashboard/data/edp.sqlite3` | Legacy/fallback mart |

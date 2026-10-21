@@ -131,6 +131,12 @@ def _login() -> tuple[str, str, dict[str, Any] | None]:
 
 def _get_access_token(force_login: bool = False) -> tuple[str, dict[str, Any] | None]:
     global _access_token, _refresh_token
+    from .portal_policy import enabled as portal_enabled
+    from .auth import get_current_user
+    user=get_current_user()
+    if portal_enabled() and user and user.role != 'admin':
+        from .portal_runtime import portal_access_token
+        return portal_access_token(user)
     if ROCKY_DASHBOARD_API_TOKEN:
         return ROCKY_DASHBOARD_API_TOKEN, None
     if not force_login and _access_token:
@@ -143,6 +149,14 @@ def _get_access_token(force_login: bool = False) -> tuple[str, dict[str, Any] | 
 
 
 def _post(path: str, payload: dict[str, Any]) -> tuple[int, Any]:
+    from .portal_policy import enabled as portal_enabled
+    from .auth import get_current_user
+    caller=get_current_user()
+    per_user = portal_enabled() and caller is not None and caller.role != 'admin'
+    if per_user:
+        from .portal_policy import allowed_read_post
+        if not allowed_read_post(path):
+            return 403, {'error':'API route/method is not approved for read-only portal access'}
     if not ROCKY_DASHBOARD_API_BASE_URL:
         return 0, {"error": "ROCKY_DASHBOARD_API_BASE_URL chưa được cấu hình"}
     token, auth_error = _get_access_token()
@@ -150,8 +164,12 @@ def _post(path: str, payload: dict[str, Any]) -> tuple[int, Any]:
         return 0, auth_error
 
     url = f"{ROCKY_DASHBOARD_API_BASE_URL.rstrip('/')}/{path.lstrip('/')}"
+    from .portal_policy import enabled as portal_enabled
+    from .auth import get_current_user
+    caller=get_current_user()
+    per_user = portal_enabled() and caller is not None and caller.role != 'admin'
     headers = {
-        "Authorization": f"Bearer {token}",
+        "Authorization": token if per_user else f"Bearer {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
@@ -165,7 +183,23 @@ def _post(path: str, payload: dict[str, Any]) -> tuple[int, Any]:
     except httpx.HTTPError as exc:
         return 0, {"error": "Không gọi được Rocky Lens dashboard API", "detail": str(exc)}
 
-    if response.status_code == 401 and not ROCKY_DASHBOARD_API_TOKEN and ROCKY_DASHBOARD_USERNAME:
+    from .portal_policy import enabled as portal_enabled
+    from .auth import get_current_user
+    caller=get_current_user()
+    per_user = portal_enabled() and caller is not None and caller.role != 'admin'
+    if response.status_code == 401 and per_user:
+        from .portal_runtime import portal_access_token
+        token,auth_error=portal_access_token(caller,force_refresh=True)
+        if auth_error:
+            return 401, {'error':'Rocky user token expired or revoked; sign in again','login_required':True}
+        headers['Authorization']=token
+        try:
+            response=httpx.post(url,json=payload,headers=headers,timeout=DEFAULT_TIMEOUT_SECONDS,follow_redirects=False)
+        except httpx.HTTPError:
+            return 0, {'error':'Rocky user API is unavailable'}
+        if response.status_code==401:
+            return 401, {'error':'Rocky user token expired or revoked; sign in again','login_required':True}
+    if response.status_code == 401 and not per_user and not ROCKY_DASHBOARD_API_TOKEN and ROCKY_DASHBOARD_USERNAME:
         token, auth_error = _get_access_token(force_login=True)
         if auth_error:
             return 0, auth_error
@@ -271,13 +305,24 @@ def query_dashboard_revenue(
             else {}
         )
         if isinstance(all_summary, dict):
+            hmk_sales_orders = all_summary.get("hmkSystemNumOrder")
+            sales_orders = all_summary.get("numOrder")
+            other_sales_orders = (
+                sales_orders - hmk_sales_orders
+                if isinstance(sales_orders, (int, float))
+                and isinstance(hmk_sales_orders, (int, float))
+                else None
+            )
             result["dashboard_summary"] = {
                 "scope": "summary.all",
                 "total_revenue": all_summary.get("totalRevenue"),
                 "hmk_revenue": all_summary.get("hmkRevenue"),
                 "other_revenue": all_summary.get("otherRevenue"),
                 "sales_orders": all_summary.get("numOrder"),
+                "hmk_sales_orders": hmk_sales_orders,
+                "other_sales_orders": other_sales_orders,
                 "return_orders": all_summary.get("numReturnOrder"),
+                "other_sales_orders_formula": "numOrder - hmkSystemNumOrder",
             }
         result["source_snapshot_at"] = datetime.now(VN_TIMEZONE).isoformat(
             timespec="seconds"

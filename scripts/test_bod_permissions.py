@@ -39,11 +39,15 @@ async def call_tools(url: str, api_key: str) -> dict[str, int | str]:
             for tool, arguments, expected in (
                 ("get_tinh_hinh_kinh_doanh", {"relative_period": "today"}, "allowed"),
                 ("get_products", {"top_n": 3}, "allowed"),
-                ("get_dashboard_sales_by_customer", {"top_n": 3}, "allowed"),
+                ("get_inventory_live", {"limit": 1}, "allowed"),
+                ("get_customer_sales", {"relative_period": "today", "top_n": 3}, "allowed"),
                 ("get_dashboard_debt_overview", {"relative_period": "today"}, "allowed"),
                 ("query_raw_pos_sql_tool", {"sql": "SELECT 1"}, "blocked"),
-                ("get_inventory_live", {"limit": 1}, "blocked"),
+                ("get_dashboard_sales_by_customer", {"top_n": 3}, "blocked"),
+                ("get_orders", {"date_from": "2026-08-24", "date_to": "2026-08-24"}, "blocked"),
                 ("get_dashboard_metric", {"metric": "revenue_details"}, "blocked"),
+                ("get_dashboard_metric", {"metric": "customer_by_order"}, "blocked"),
+                ("get_dashboard_metric", {"metric": "order_by_time"}, "allowed"),
                 ("get_debt", {}, "blocked"),
                 ("trigger_debt_reminders", {}, "blocked"),
             ):

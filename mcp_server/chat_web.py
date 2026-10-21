@@ -52,25 +52,15 @@ try:
         query_return_exchange_requests,
         query_return_orders,
     )
-    from mcp_server.dashboard_api import query_dashboard_order_overview, query_dashboard_order_by_site, query_dashboard_revenue
+    from mcp_server.dashboard_api import query_dashboard_order_overview, query_dashboard_order_by_site
     TOOLS_AVAILABLE = True
 except Exception as e:
     TOOLS_AVAILABLE = False
     print(f"Warning: Could not load tools: {e}")
 
 # ── Tool mapping ──────────────────────────────────────────────────────────────
-def query_revenue_dashboard_alias(date_from=None, date_to=None, store_id=None):
-    """Keep the web chat's legacy name aligned with Dashboard revenue."""
-    if not date_from or not date_to:
-        raise ValueError("get_revenue requires date_from and date_to")
-    return query_dashboard_revenue(
-        date_from, date_to, [str(store_id)] if store_id else None, 1
-    )
-
-
 TOOL_FUNCTIONS = {
-    "get_revenue": query_revenue_dashboard_alias,
-    "get_revenue_legacy": query_revenue,
+    "get_revenue": query_revenue,
     "get_subtotal": query_subtotal,
     "get_debt": query_debt,
     "get_staff_revenue": query_staff_revenue,
@@ -118,8 +108,7 @@ Format: ```tool_call\n{"name": "TOOL_NAME", "args": {...}}\n```
 ### Tools có sẵn:
 0. get_dashboard_order_overview(date_from, date_to, site_ids?, staff_ids?, period_type?) — KPI Tổng quan nguyên payload từ Rocky Lens dashboard; ưu tiên để khớp UI
 0.1 get_dashboard_order_by_site(date_from, date_to, site_ids?, period_type?) — doanh thu theo chi nhánh nguyên payload từ dashboard
-1. get_revenue(date_from, date_to, store_id?) — Alias Dashboard: Tổng, HMK, Khác, số đơn bán và đơn trả
-1.1 get_revenue_legacy(date_from, date_to, store_id?) — Đối soát POS cohort, không phải số UI
+1. get_revenue(date_from, date_to, store_id?) — 4 KPI Tổng quan: số đơn, giá trị đơn, thực thu, còn phải thu
 2. get_subtotal(date_from, date_to, store_id?) — Doanh số NET đơn duyệt đã trừ đơn trả, tách HMK/Khác
 3. get_debt(customer_name?, date_from?, date_to?) — Công nợ B2B
 4. get_staff_revenue(date_from, date_to, staff_name?) — Doanh thu nhân viên

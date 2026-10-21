@@ -35,6 +35,7 @@ if (-not $existing) {
     & $serviceExe install $serviceXml
 } else {
     Stop-Service RockyMCPStaging -ErrorAction SilentlyContinue
+    & $serviceExe refresh $serviceXml
 }
 
 Start-Service RockyMCPStaging

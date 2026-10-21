@@ -19,9 +19,21 @@ _FORBIDDEN_SQL = re.compile(
     r"into|for\s+update|for\s+share)\b|pg_sleep|dblink|lo_import|lo_export",
     re.IGNORECASE,
 )
+_BOD_WMS_ALLOWED_RELATIONS = frozenset({
+    "warehouse",
+    "site",
+    "product",
+    "productcategory",
+    "productitemwarehouseinventory",
+    "warehouseinventoryhistory",
+    "outbounddelivery",
+})
+_RELATION_RE = re.compile(r'\b(?:from|join)\s+"?([A-Za-z_][A-Za-z0-9_]*)"?', re.IGNORECASE)
 
 
 def _get_wms_conn():
+    from .portal_policy import require_sql_admin
+    require_sql_admin()
     if not WMS_PG_DSN:
         raise RuntimeError("WMS_PG_DSN is not configured")
     options = (
@@ -66,12 +78,28 @@ def _rows(cursor) -> list[dict[str, Any]]:
     return [dict(zip(columns, (_value(value) for value in row))) for row in cursor.fetchall()]
 
 
+def _scope_denied() -> dict:
+    return {"error": "No warehouses are authorized", "code": 403, "source": "wms_live"}
+
+
+def _add_warehouse_scope(conditions, params, column, allowed_warehouse_ids):
+    if allowed_warehouse_ids is not None:
+        conditions.append(f'{column}::text = ANY(%s)')
+        params.append([str(value) for value in allowed_warehouse_ids])
+
+
+def _without_cost(rows):
+    fields = {"cost_price", "inventory_value", "avg_cost_price", "total_cost_price", "total_amount"}
+    return [{key: value for key, value in row.items() if key not in fields} for row in rows]
+
+
 def _cache_inventory(
     warehouse_code: str | None,
     product_search: str | None,
     low_stock_only: bool,
     limit: int,
     live_error: str,
+    include_cost: bool = True,
 ) -> dict:
     """Graceful fallback for summary inventory when live WMS is unavailable."""
     if not DASHBOARD_PG_DSN:
@@ -98,14 +126,17 @@ def _cache_inventory(
             with conn.cursor() as cur:
                 cur.execute(
                     f"""SELECT store_id AS site_id, product_id, product_name, category,
-                               on_hand, available, cost_price, inventory_value,
+                               on_hand, available,
+                               {'cost_price, inventory_value,' if include_cost else ''}
                                last_movement_at, synced_at
                         FROM inventory_wms {where}
-                        ORDER BY inventory_value DESC NULLS LAST
+                        ORDER BY {'inventory_value' if include_cost else 'on_hand'} DESC NULLS LAST
                         LIMIT %s""",
                     params + [_limit(limit)],
                 )
                 rows = _rows(cur)
+                if not include_cost:
+                    rows = _without_cost(rows)
                 cur.execute("SELECT MAX(synced_at) FROM inventory_wms")
                 data_as_of = _value(cur.fetchone()[0])
         return {
@@ -155,13 +186,18 @@ def query_wms_health() -> dict:
         }
 
 
-def query_warehouses_live() -> dict:
+def query_warehouses_live(allowed_warehouse_ids: list[str] | None = None) -> dict:
     """List active warehouses/sites with live stock totals."""
+    if allowed_warehouse_ids is not None and not allowed_warehouse_ids:
+        return _scope_denied()
+    conditions = ['w."DeleteAt" IS NULL']
+    params: list[Any] = []
+    _add_warehouse_scope(conditions, params, 'w."Id"', allowed_warehouse_ids)
     try:
         with _get_wms_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT w."Id" AS warehouse_id, w."Code" AS warehouse_code,
+                    f"""SELECT w."Id" AS warehouse_id, w."Code" AS warehouse_code,
                               w."Name" AS warehouse_name, s."Id" AS site_id,
                               s."Code" AS site_code, s."Name" AS site_name,
                               COUNT(DISTINCT i."ProductId") AS product_count,
@@ -170,10 +206,10 @@ def query_warehouses_live() -> dict:
                        LEFT JOIN "Site" s ON s."Id" = w."SiteId" AND s."DeleteAt" IS NULL
                        LEFT JOIN "ProductItemWarehouseInventory" i
                               ON i."WarehouseId" = w."Id" AND i."DeleteAt" IS NULL
-                       WHERE w."DeleteAt" IS NULL
+                       WHERE {' AND '.join(conditions)}
                        GROUP BY w."Id", w."Code", w."Name", s."Id", s."Code", s."Name"
                        ORDER BY s."Name", w."Name"
-                    """
+                    """, params
                 )
                 rows = _rows(cur)
         return {"metric": "wms_warehouses", "source": "wms_live", "rows": rows, "count": len(rows)}
@@ -186,10 +222,15 @@ def query_inventory_live(
     product_search: str | None = None,
     low_stock_only: bool = False,
     limit: int = 50,
+    allowed_warehouse_ids: list[str] | None = None,
+    include_cost: bool = True,
 ) -> dict:
     """Query current stock directly from WMS, with dashboard-cache fallback."""
+    if allowed_warehouse_ids is not None and not allowed_warehouse_ids:
+        return _scope_denied()
     conditions = ['i."DeleteAt" IS NULL', 'w."DeleteAt" IS NULL', 'p."DeleteAt" IS NULL']
     params: list[Any] = []
+    _add_warehouse_scope(conditions, params, 'i."WarehouseId"', allowed_warehouse_ids)
     if warehouse_code:
         conditions.append('(w."Code" ILIKE %s OR w."Name" ILIKE %s)')
         params.extend([f"%{warehouse_code}%", f"%{warehouse_code}%"])
@@ -199,6 +240,8 @@ def query_inventory_live(
     if low_stock_only:
         conditions.append('i."StockQuantity" <= COALESCE(p."StockLimitMin", 0)')
     where = " AND ".join(conditions)
+    cost_columns = '''AVG(i."CostPrice") AS avg_cost_price,
+                               SUM(i."StockQuantity" * COALESCE(i."CostPrice", 0)) AS inventory_value,''' if include_cost else ''
 
     try:
         with _get_wms_conn() as conn:
@@ -209,8 +252,7 @@ def query_inventory_live(
                                p."Id" AS product_id, p."Code" AS product_code,
                                p."Name" AS product_name, pc."Name" AS category,
                                SUM(i."StockQuantity") AS on_hand,
-                               AVG(i."CostPrice") AS avg_cost_price,
-                               SUM(i."StockQuantity" * COALESCE(i."CostPrice", 0)) AS inventory_value,
+                               {cost_columns}
                                p."StockLimitMin" AS stock_limit_min,
                                p."StockLimitMax" AS stock_limit_max,
                                MAX(i."UpdateAt") AS updated_at
@@ -222,11 +264,13 @@ def query_inventory_live(
                         WHERE {where}
                         GROUP BY w."Id", w."Code", w."Name", s."Name", p."Id", p."Code",
                                  p."Name", pc."Name", p."StockLimitMin", p."StockLimitMax"
-                        ORDER BY inventory_value DESC NULLS LAST
+                        ORDER BY {'inventory_value' if include_cost else 'on_hand'} DESC NULLS LAST
                         LIMIT %s""",
                     params + [_limit(limit)],
                 )
                 rows = _rows(cur)
+                if not include_cost:
+                    rows = _without_cost(rows)
         return {
             "metric": "wms_live_inventory",
             "source": "wms_live",
@@ -236,7 +280,11 @@ def query_inventory_live(
         }
     except Exception as error:
         message = f"{type(error).__name__}: {str(error).splitlines()[0]}"
-        return _cache_inventory(warehouse_code, product_search, low_stock_only, limit, message)
+        if allowed_warehouse_ids is not None:
+            return {"error": f"WMS query failed: {message}", "source": "wms_live"}
+        if include_cost:
+            return _cache_inventory(warehouse_code, product_search, low_stock_only, limit, message)
+        return _cache_inventory(warehouse_code, product_search, low_stock_only, limit, message, include_cost=False)
 
 
 def query_inventory_movements(
@@ -246,8 +294,11 @@ def query_inventory_movements(
     product_search: str | None = None,
     include_cancelled: bool = False,
     limit: int = 100,
+    allowed_warehouse_ids: list[str] | None = None,
 ) -> dict:
     """Query WMS stock movement history for a bounded date range."""
+    if allowed_warehouse_ids is not None and not allowed_warehouse_ids:
+        return _scope_denied()
     try:
         start, end = _date_range(date_from, date_to)
     except ValueError as error:
@@ -255,6 +306,7 @@ def query_inventory_movements(
 
     conditions = ['h."DeleteAt" IS NULL', 'h."IssueAt" >= %s', 'h."IssueAt" < %s']
     params: list[Any] = [start, end + timedelta(days=1)]
+    _add_warehouse_scope(conditions, params, 'h."WarehouseId"', allowed_warehouse_ids)
     if not include_cancelled:
         conditions.append('COALESCE(h."IsCancel", FALSE) = FALSE')
     if warehouse_code:
@@ -296,8 +348,13 @@ def query_outbound_deliveries(
     warehouse_code: str | None = None,
     status: str | None = None,
     limit: int = 100,
+    allowed_warehouse_ids: list[str] | None = None,
+    include_cost: bool = True,
+    assigned_staff_id: str | None = None,
 ) -> dict:
     """Query outbound deliveries directly from WMS."""
+    if allowed_warehouse_ids is not None and not allowed_warehouse_ids:
+        return _scope_denied()
     try:
         start, end = _date_range(date_from, date_to)
     except ValueError as error:
@@ -305,6 +362,10 @@ def query_outbound_deliveries(
 
     conditions = ['d."DeleteAt" IS NULL', 'd."IssueAt" >= %s', 'd."IssueAt" < %s']
     params: list[Any] = [start, end + timedelta(days=1)]
+    _add_warehouse_scope(conditions, params, 'd."WarehouseId"', allowed_warehouse_ids)
+    if assigned_staff_id:
+        conditions.append('d."StaffId"::text = %s')
+        params.append(str(assigned_staff_id))
     if warehouse_code:
         conditions.append('(w."Code" ILIKE %s OR w."Name" ILIKE %s)')
         params.extend([f"%{warehouse_code}%", f"%{warehouse_code}%"])
@@ -318,6 +379,8 @@ def query_outbound_deliveries(
     elif status_key:
         return {"error": "status must be completed, cancelled, or processing"}
 
+    cost_columns = '''d."TotalAmount" AS total_amount,
+                               d."TotalCostPrice" AS total_cost_price,''' if include_cost else ''
     try:
         with _get_wms_conn() as conn:
             with conn.cursor() as cur:
@@ -329,8 +392,7 @@ def query_outbound_deliveries(
                                     ELSE 'processing' END AS status,
                                w."Code" AS warehouse_code, w."Name" AS warehouse_name,
                                s."Name" AS site_name, d."TotalQuantity" AS total_quantity,
-                               d."SubQuantity" AS line_count, d."TotalAmount" AS total_amount,
-                               d."TotalCostPrice" AS total_cost_price,
+                               d."SubQuantity" AS line_count, {cost_columns}
                                d."OrderId" AS order_id, d."StockTransferOrderId" AS stock_transfer_order_id
                         FROM "OutboundDelivery" d
                         LEFT JOIN "Warehouse" w ON w."Id" = d."WarehouseId"
@@ -341,6 +403,8 @@ def query_outbound_deliveries(
                     params + [_limit(limit)],
                 )
                 rows = _rows(cur)
+                if not include_cost:
+                    rows = _without_cost(rows)
         return {"metric": "wms_outbound_deliveries", "source": "wms_live", "rows": rows, "count": len(rows), "period": f"{date_from} to {date_to}"}
     except Exception as error:
         return {"error": f"WMS query failed: {type(error).__name__}: {str(error).splitlines()[0]}", "source": "wms_live"}
@@ -371,3 +435,29 @@ def query_raw_wms_sql(sql: str) -> dict:
         }
     except Exception as error:
         return {"error": f"WMS query failed: {type(error).__name__}: {str(error).splitlines()[0]}", "source": "wms_live"}
+
+
+def query_bod_wms_sql(sql: str) -> dict:
+    """Execute a BOD-safe WMS query limited to stock/warehouse relations."""
+    statement = sql.strip()
+    if not re.match(r"^select\b", statement, re.IGNORECASE):
+        return {"error": "BOD raw WMS chỉ hỗ trợ một câu SELECT.", "code": 403, "source": "wms_bod_gateway"}
+    if ";" in statement or "--" in statement or "/*" in statement or _FORBIDDEN_SQL.search(statement):
+        return {"error": "Câu truy vấn chứa token không được phép.", "code": 403, "source": "wms_bod_gateway"}
+    relations = {match.casefold() for match in _RELATION_RE.findall(statement)}
+    if not relations:
+        return {"error": "BOD raw WMS phải có FROM hoặc JOIN vào bảng kho/tồn được cấp quyền.", "code": 403, "source": "wms_bod_gateway"}
+    disallowed = relations - _BOD_WMS_ALLOWED_RELATIONS
+    if disallowed:
+        return {
+            "error": "BOD raw WMS chỉ được dùng bảng kho/tồn đã cấp quyền.",
+            "code": 403,
+            "source": "wms_bod_gateway",
+            "disallowed_relations": sorted(disallowed),
+            "allowed_relations": sorted(_BOD_WMS_ALLOWED_RELATIONS),
+        }
+    result = query_raw_wms_sql(statement)
+    if "error" not in result:
+        result["source"] = "wms_bod_gateway"
+        result["allowed_relations"] = sorted(_BOD_WMS_ALLOWED_RELATIONS)
+    return result
