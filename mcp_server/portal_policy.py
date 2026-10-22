@@ -48,8 +48,14 @@ def dispatch(func,args,kwargs):
     if not user or not getattr(user,'portal_session',''):
         return {'error':'Sign in with your own Rocky Dashboard account','code':401,'login_required':True}
     if func.__name__ not in API_ONLY_TOOLS:
-        return {'error':'This tool has no verified per-user Rocky API adapter; SQL fallback is disabled',
-                'code':403,'api_only':True,'alternatives':sorted(API_ONLY_TOOLS)}
+        return {
+            'error': 'This operation has no verified per-user Rocky API adapter. '
+                     'MCP does not use raw SQL or legacy direct queries for Portal sessions.',
+            'code': 403,
+            'api_only': True,
+            'scope': 'The signed-in account can still use the listed read-only Portal and Dashboard API tools, subject to its Rocky permissions.',
+            'alternatives': sorted(API_ONLY_TOOLS),
+        }
     import inspect
     result=inspect.unwrap(func)(*args,**kwargs)
     if isinstance(result,dict):
