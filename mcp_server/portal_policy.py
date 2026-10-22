@@ -25,6 +25,7 @@ API_ONLY_TOOLS=frozenset({
     'get_dashboard_order_overview','get_tinh_hinh_kinh_doanh','get_dashboard_order_by_site',
     'get_dashboard_revenue','get_revenue_by_source','get_dashboard_sales_by_customer','get_dashboard_debt_overview',
     'get_dashboard_debt_customers','get_dashboard_metric',
+    'get_product_industry_sales',
 })
 
 

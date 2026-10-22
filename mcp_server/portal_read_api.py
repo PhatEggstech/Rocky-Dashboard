@@ -118,6 +118,126 @@ def query_portal_list(resource, page=1, size=20, date_from=None, date_to=None, c
         return _error('Rocky list service unavailable',503)
 
 
+_LENS_CATEGORY_CODES = frozenset({
+    'HAI TRONG', 'DRIVESHIELD', 'CHONG TIA UV', 'DOI MAU', 'CHONG VA DAP',
+    'BLUECUT', 'BLUECONTROL', 'MYOPIA', 'DA TRONG',
+})
+
+
+def _category_code(value):
+    """Normalise Rocky category codes/names without guessing from product names."""
+    import unicodedata
+    text = unicodedata.normalize('NFD', str(value or ''))
+    text = ''.join(char for char in text if unicodedata.category(char) != 'Mn')
+    return ' '.join(text.upper().split())
+
+
+def query_product_industry_sales_api(date_from: str, date_to: str) -> dict:
+    """Classify Dashboard product revenue using the caller-visible Product category.
+
+    Dashboard's Product/ByRevenue response has product IDs and amounts but no
+    category. Product/GetPage provides the authoritative category per product.
+    Joining those two read-only, per-user API responses avoids the former SQL
+    fallback and never treats a product name as its industry.
+    """
+    product_pages = []
+    first = query_portal_list('products', page=1, size=100)
+    if first.get('error'):
+        return first
+    product_pages.extend(first.get('data') or [])
+    meta = first.get('meta') or {}
+    page_count = meta.get('pageCount')
+    if not isinstance(page_count, int) or page_count < 1 or page_count > 100:
+        return _error('Invalid Rocky product pagination metadata', 502)
+    for page in range(2, page_count + 1):
+        response = query_portal_list('products', page=page, size=100)
+        if response.get('error'):
+            return response
+        product_pages.extend(response.get('data') or [])
+
+    product_categories = {}
+    for product in product_pages:
+        if not isinstance(product, dict) or not product.get('id'):
+            continue
+        category = product.get('productCategory') or {}
+        category_code = _category_code(category.get('code') or category.get('name'))
+        product_categories[str(product['id'])] = {
+            'code': category_code,
+            'name': category.get('displayName') or category.get('name'),
+        }
+
+    from .dashboard_api import query_dashboard_metric
+    dashboard = query_dashboard_metric('product_by_revenue', date_from, date_to, size=100)
+    if not dashboard.get('ok'):
+        return dashboard
+    body = dashboard.get('data') or {}
+    items = ((body.get('data') or {}).get('items') or []) if isinstance(body, dict) else []
+    if not isinstance(items, list):
+        return _error('Invalid Rocky dashboard product revenue response', 502)
+
+    buckets = {
+        'frames_dd': {'revenue': 0.0, 'products': 0},
+        'lenses_dt': {'revenue': 0.0, 'products': 0},
+        'other_categorized': {'revenue': 0.0, 'products': 0},
+        'unclassified': {'revenue': 0.0, 'products': 0},
+    }
+    category_breakdown = {}
+    dashboard_total = 0.0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            amount = float(item.get('totalAmount') or 0)
+        except (TypeError, ValueError):
+            return _error('Invalid product revenue amount from Rocky dashboard', 502)
+        dashboard_total += amount
+        category = product_categories.get(str(item.get('productId'))) or {}
+        code = category.get('code') or ''
+        name = category.get('name') or 'Chưa phân loại'
+        if code == 'GONG':
+            bucket = 'frames_dd'
+        elif code in _LENS_CATEGORY_CODES:
+            bucket = 'lenses_dt'
+        elif code:
+            bucket = 'other_categorized'
+        else:
+            bucket = 'unclassified'
+        buckets[bucket]['revenue'] += amount
+        buckets[bucket]['products'] += 1
+        entry = category_breakdown.setdefault(name, {'category': name, 'revenue': 0.0, 'products': 0})
+        entry['revenue'] += amount
+        entry['products'] += 1
+
+    for bucket in buckets.values():
+        bucket['revenue'] = round(bucket['revenue'])
+    for entry in category_breakdown.values():
+        entry['revenue'] = round(entry['revenue'])
+
+    return {
+        'metric': 'product_industry_sales',
+        'source': 'rocky_dashboard_api + rocky_pos_product_api',
+        'authorization_source': 'rocky_api_per_user_token',
+        'sql_fallback': False,
+        'period': {'date_from': date_from, 'date_to': date_to},
+        'frames_dd': buckets['frames_dd'],
+        'lenses_dt': buckets['lenses_dt'],
+        'other_categorized': buckets['other_categorized'],
+        'unclassified': buckets['unclassified'],
+        'dashboard_total_revenue': round(dashboard_total),
+        'category_breakdown': sorted(category_breakdown.values(), key=lambda entry: entry['revenue'], reverse=True),
+        'coverage': {
+            'dashboard_products': len(items),
+            'visible_product_catalog': len(product_pages),
+            'classified_by_authoritative_category': len(items) - buckets['unclassified']['products'],
+            'unclassified_products': buckets['unclassified']['products'],
+        },
+        'disclaimer': (
+            'DD chi gom ProductCategory.Code=GONG. DT chi gom cac ProductCategory lens da khai bao. '
+            'San pham khong co danh muc API duoc bao rieng va khong duoc cong vao DD hay DT.'
+        ),
+    }
+
+
 def query_orders_created_summary(date_from: str, date_to: str) -> dict:
     """Aggregate the Order page footer using only the caller's API-visible rows.
 

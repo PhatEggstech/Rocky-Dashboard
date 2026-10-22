@@ -1300,6 +1300,12 @@ def get_gross_net_sales(date_from: str, date_to: str) -> dict:
 @enforce_store_filter
 def get_product_industry_sales(date_from: str, date_to: str) -> dict:
     """Phân loại doanh số hàng hóa theo nhóm ngành hàng Gọng kính (DD) và Tròng kính (DT)."""
+    from .portal_policy import enabled as portal_enabled
+    from .auth import get_current_user
+    user = get_current_user()
+    if portal_enabled() and user and user.role != 'admin':
+        from .portal_read_api import query_product_industry_sales_api
+        return query_product_industry_sales_api(date_from, date_to)
     return query_product_industry_sales(date_from, date_to)
 
 
