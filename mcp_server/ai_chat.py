@@ -608,14 +608,14 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_dashboard_sales_by_customer",
-            "description": "Lấy một trang Doanh số khách hàng Rocky Lens. Tổng trong kết quả chỉ của trang hiện tại; customer_count là tổng danh sách API.",
+            "description": "Lấy Doanh số khách hàng Rocky Lens theo trang. top_n có thể lớn hơn 100: MCP tự đọc nhiều trang Rocky (100 dòng/request). Tổng trong kết quả chỉ áp dụng cho các dòng đã đọc; customer_count là tổng danh sách API.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "date_from": {"type": "string", "description": "Ngày bắt đầu YYYY-MM-DD; không dùng cùng relative_period"},
                     "date_to": {"type": "string", "description": "Ngày kết thúc YYYY-MM-DD; không dùng cùng relative_period"},
                     "relative_period": {"type": "string", "enum": ["today", "yesterday", "this_week", "last_week", "this_month"], "description": "Dùng cho kỳ tương đối; được server tính theo Asia/Ho_Chi_Minh"},
-                    "top_n": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Số khách top để khớp bộ chọn Dashboard, mặc định 10"},
+                    "top_n": {"type": "integer", "minimum": 1, "description": "Số dòng khách cần đọc; lớn hơn 100 sẽ tự phân trang Rocky, mặc định 10"},
                     "page": {"type": "integer", "minimum": 1, "description": "Trang Dashboard cần đọc, mặc định 1"},
                     "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Số dòng mỗi trang; mặc định dùng top_n"},
                 },

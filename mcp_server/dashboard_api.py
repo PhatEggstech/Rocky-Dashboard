@@ -337,44 +337,82 @@ def query_dashboard_sales_by_customer(
     page: int = 1,
     page_size: int | None = None,
 ) -> dict[str, Any]:
-    """Return one read-only Dashboard sales-by-customer page."""
-    if not 1 <= top_n <= 100:
-        raise ValueError("top_n must be between 1 and 100")
+    """Return customer-sales rows through the caller-visible Dashboard API.
+
+    Rocky limits one API request to 100 rows.  ``top_n`` is deliberately not
+    capped by MCP: values above 100 are read through successive Rocky pages.
+    """
+    if not isinstance(top_n, int) or isinstance(top_n, bool) or top_n < 1:
+        raise ValueError("top_n must be a positive integer")
     if page < 1:
         raise ValueError("page must be positive")
-    size = top_n if page_size is None else page_size
+    size = min(top_n, 100) if page_size is None else page_size
     if not 1 <= size <= 100:
         raise ValueError("page_size must be between 1 and 100")
     result = _base_result(
         "dashboard_sales_by_customer", date_from, date_to, 1, None, None
     )
-    payload = {
-        "fromDate": result["request"]["startAt"],
-        "toDate": result["request"]["endAt"],
-        "page": page,
-        "size": size,
-    }
-    status, body = _post("/Admin/Dashboard/Revenue/SalesByCustomer", payload)
+    def read_page(page_number: int) -> tuple[int, Any, dict[str, Any]]:
+        payload = {
+            "fromDate": result["request"]["startAt"],
+            "toDate": result["request"]["endAt"],
+            "page": page_number,
+            "size": size,
+        }
+        status, body = _post("/Admin/Dashboard/Revenue/SalesByCustomer", payload)
+        return status, body, payload
+
+    status, body, first_payload = read_page(page)
     result["http_status"] = status
+    result["request_payload"] = first_payload
     if status == 0 or status >= 400:
         result["ok"] = False
         result["error"] = body
         return result
 
     rows = body.get("data", []) if isinstance(body, dict) else []
+    if not isinstance(rows, list):
+        result["ok"] = False
+        result["error"] = {"error": "Invalid customer-sales rows from Rocky Dashboard"}
+        return result
     meta = body.get("meta", {}) if isinstance(body, dict) else {}
+    total = meta.get("total") if isinstance(meta, dict) else None
+    remaining = max(0, total - (page - 1) * size) if isinstance(total, int) else top_n
+    requested_rows = min(top_n, remaining)
+    pages_to_read = max(1, (requested_rows + size - 1) // size) if requested_rows else 1
+    pages_read = [page]
+    for page_number in range(page + 1, page + pages_to_read):
+        next_status, next_body, _ = read_page(page_number)
+        if next_status == 0 or next_status >= 400:
+            result["ok"] = False
+            result["http_status"] = {"failed_page": page_number, "status": next_status}
+            result["error"] = next_body
+            return result
+        next_rows = next_body.get("data", []) if isinstance(next_body, dict) else []
+        if not isinstance(next_rows, list):
+            result["ok"] = False
+            result["error"] = {"error": "Invalid customer-sales rows from Rocky Dashboard"}
+            return result
+        rows.extend(next_rows)
+        pages_read.append(page_number)
+
+    # An upstream page can include fewer rows on the last page. Never invent
+    # rows to reach top_n.
+    rows = rows[:requested_rows]
     result["ok"] = True
-    result["data"] = body
-    # The rows and their sums apply to this page only. `meta.total` is the
-    # complete number of customers matching Rocky's upstream scope.
+    result["data"] = {"meta": meta, "data": rows}
     result["dashboard_summary"] = {
-        "page": page,
+        "start_page": page,
         "page_size": size,
-        "page_revenue": sum((row.get("totalRevenue") or 0) for row in rows),
-        "customer_count": meta.get("total"),
-        "page_num_order": sum((row.get("numOrder") or 0) for row in rows),
-        "page_num_return_order": sum((row.get("numReturnOrder") or 0) for row in rows),
-        "scope": "current_page_only",
+        "pages_read": pages_read,
+        "returned_customer_rows": len(rows),
+        "requested_customer_rows": top_n,
+        "returned_revenue": sum((row.get("totalRevenue") or 0) for row in rows),
+        "customer_count": total,
+        "returned_num_order": sum((row.get("numOrder") or 0) for row in rows),
+        "returned_num_return_order": sum((row.get("numReturnOrder") or 0) for row in rows),
+        "complete_for_token_scope": isinstance(total, int) and len(rows) >= remaining,
+        "scope": "rows_read_from_rocky_pages",
     }
     return result
 

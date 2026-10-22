@@ -1082,8 +1082,9 @@ def get_dashboard_sales_by_customer(
 ) -> dict:
     """Doanh số khách hàng đúng theo trang Doanh số KH Rocky Lens.
 
-    Trả một trang theo page/page_size. Các tổng trong dashboard_summary chỉ áp
-    dụng cho trang đó; customer_count là tổng danh sách Rocky trả về.
+    `top_n` lớn hơn 100 sẽ tự đọc nhiều trang Rocky (100 dòng/request). Các
+    tổng trong dashboard_summary chỉ áp dụng cho các dòng đã đọc;
+    customer_count là tổng danh sách Rocky trả về.
     """
     resolved_from, resolved_to, period_label = _resolve_reporting_range(
         date_from, date_to, relative_period

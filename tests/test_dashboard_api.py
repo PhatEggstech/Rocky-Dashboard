@@ -117,25 +117,62 @@ def test_customer_sales_uses_top_n_and_matches_dashboard_card_rule():
     with patch.object(dashboard_api, "ROCKY_DASHBOARD_API_TOKEN", "unit-test-token"):
         with patch.object(dashboard_api.httpx, "post", return_value=Response()) as post:
             result = dashboard_api.query_dashboard_sales_by_customer(
-                "2026-07-31", "2026-07-31", top_n=10, page=8, page_size=25
+                "2026-07-31", "2026-07-31", top_n=10, page=1, page_size=10
             )
 
     assert result["dashboard_summary"] == {
-        "page": 8,
-        "page_size": 25,
-        "page_revenue": 42,
+        "start_page": 1,
+        "page_size": 10,
+        "pages_read": [1],
+        "returned_customer_rows": 2,
+        "requested_customer_rows": 10,
+        "returned_revenue": 42,
         "customer_count": 169,
-        "page_num_order": 6,
-        "page_num_return_order": 1,
-        "scope": "current_page_only",
+        "returned_num_order": 6,
+        "returned_num_return_order": 1,
+        "complete_for_token_scope": False,
+        "scope": "rows_read_from_rocky_pages",
     }
     assert post.call_args.args[0].endswith("/Admin/Dashboard/Revenue/SalesByCustomer")
     assert post.call_args.kwargs["json"] == {
         "fromDate": 1785430800000,
         "toDate": 1785517199999,
-        "page": 8,
-        "size": 25,
+        "page": 1,
+        "size": 10,
     }
+
+
+def test_customer_sales_reads_multiple_rocky_pages_when_top_n_exceeds_100():
+    class Response:
+        status_code = 200
+        text = ""
+
+        def __init__(self, page):
+            self.page = page
+
+        def json(self):
+            row_count = 100 if self.page < 3 else 50
+            return {
+                "meta": {"total": 250},
+                "data": [
+                    {"totalRevenue": 1, "numOrder": 1, "numReturnOrder": 0}
+                    for _ in range(row_count)
+                ],
+            }
+
+    def post(*args, **kwargs):
+        return Response(kwargs["json"]["page"])
+
+    with patch.object(dashboard_api, "ROCKY_DASHBOARD_API_TOKEN", "unit-test-token"):
+        with patch.object(dashboard_api.httpx, "post", side_effect=post) as mocked_post:
+            result = dashboard_api.query_dashboard_sales_by_customer(
+                "2026-07-31", "2026-07-31", top_n=250
+            )
+
+    assert result["dashboard_summary"]["pages_read"] == [1, 2, 3]
+    assert result["dashboard_summary"]["returned_customer_rows"] == 250
+    assert result["dashboard_summary"]["complete_for_token_scope"] is True
+    assert mocked_post.call_count == 3
 
 
 def test_allow_listed_metric_uses_common_dashboard_contract():
