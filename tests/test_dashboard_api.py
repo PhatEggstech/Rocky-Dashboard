@@ -117,22 +117,24 @@ def test_customer_sales_uses_top_n_and_matches_dashboard_card_rule():
     with patch.object(dashboard_api, "ROCKY_DASHBOARD_API_TOKEN", "unit-test-token"):
         with patch.object(dashboard_api.httpx, "post", return_value=Response()) as post:
             result = dashboard_api.query_dashboard_sales_by_customer(
-                "2026-07-31", "2026-07-31", top_n=10
+                "2026-07-31", "2026-07-31", top_n=10, page=8, page_size=25
             )
 
     assert result["dashboard_summary"] == {
-        "top_n": 10,
-        "total_revenue": 42,
+        "page": 8,
+        "page_size": 25,
+        "page_revenue": 42,
         "customer_count": 169,
-        "num_order": 6,
-        "num_return_order": 1,
+        "page_num_order": 6,
+        "page_num_return_order": 1,
+        "scope": "current_page_only",
     }
     assert post.call_args.args[0].endswith("/Admin/Dashboard/Revenue/SalesByCustomer")
     assert post.call_args.kwargs["json"] == {
         "fromDate": 1785430800000,
         "toDate": 1785517199999,
-        "page": 1,
-        "size": 10,
+        "page": 8,
+        "size": 25,
     }
 
 

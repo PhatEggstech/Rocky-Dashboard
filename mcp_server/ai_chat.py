@@ -136,9 +136,11 @@ def query_dashboard_sales_by_customer_for_chat(
     date_to: str | None = None,
     relative_period: str | None = None,
     top_n: int = 10,
+    page: int = 1,
+    page_size: int | None = None,
 ) -> dict:
     start, end = _dashboard_range(date_from, date_to, relative_period)
-    return query_dashboard_sales_by_customer(start, end, top_n)
+    return query_dashboard_sales_by_customer(start, end, top_n, page, page_size)
 
 
 def query_dashboard_metric_for_chat(
@@ -606,7 +608,7 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "get_dashboard_sales_by_customer",
-            "description": "Lấy trang Doanh số khách hàng Rocky Lens. Tổng doanh số/số đơn/đơn trả theo Top N đang chọn; số khách là tổng danh sách API.",
+            "description": "Lấy một trang Doanh số khách hàng Rocky Lens. Tổng trong kết quả chỉ của trang hiện tại; customer_count là tổng danh sách API.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -614,6 +616,8 @@ TOOLS_SCHEMA = [
                     "date_to": {"type": "string", "description": "Ngày kết thúc YYYY-MM-DD; không dùng cùng relative_period"},
                     "relative_period": {"type": "string", "enum": ["today", "yesterday", "this_week", "last_week", "this_month"], "description": "Dùng cho kỳ tương đối; được server tính theo Asia/Ho_Chi_Minh"},
                     "top_n": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Số khách top để khớp bộ chọn Dashboard, mặc định 10"},
+                    "page": {"type": "integer", "minimum": 1, "description": "Trang Dashboard cần đọc, mặc định 1"},
+                    "page_size": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Số dòng mỗi trang; mặc định dùng top_n"},
                 },
                 "required": [],
             },

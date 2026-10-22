@@ -1076,17 +1076,21 @@ def get_dashboard_sales_by_customer(
     date_from: str | None = None,
     date_to: str | None = None,
     top_n: int = 10,
+    page: int = 1,
+    page_size: int | None = None,
     relative_period: RelativePeriod | None = None,
 ) -> dict:
     """Doanh số khách hàng đúng theo trang Doanh số KH Rocky Lens.
 
-    Tổng doanh số/số đơn/đơn trả được tính theo Top N đang chọn trên giao diện;
-    số khách lấy từ tổng danh sách trả về bởi Dashboard API.
+    Trả một trang theo page/page_size. Các tổng trong dashboard_summary chỉ áp
+    dụng cho trang đó; customer_count là tổng danh sách Rocky trả về.
     """
     resolved_from, resolved_to, period_label = _resolve_reporting_range(
         date_from, date_to, relative_period
     )
-    result = query_dashboard_sales_by_customer(resolved_from, resolved_to, top_n)
+    result = query_dashboard_sales_by_customer(
+        resolved_from, resolved_to, top_n, page, page_size
+    )
     result["query_context"] = _query_context(
         resolved_from, resolved_to, period_label, None
     )

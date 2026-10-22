@@ -334,18 +334,25 @@ def query_dashboard_sales_by_customer(
     date_from: str,
     date_to: str,
     top_n: int = 10,
+    page: int = 1,
+    page_size: int | None = None,
 ) -> dict[str, Any]:
-    """Mirror the Sales by Customer dashboard cards and its Top N table."""
+    """Return one read-only Dashboard sales-by-customer page."""
     if not 1 <= top_n <= 100:
         raise ValueError("top_n must be between 1 and 100")
+    if not 1 <= page <= 10_000:
+        raise ValueError("page must be positive")
+    size = top_n if page_size is None else page_size
+    if not 1 <= size <= 100:
+        raise ValueError("page_size must be between 1 and 100")
     result = _base_result(
         "dashboard_sales_by_customer", date_from, date_to, 1, None, None
     )
     payload = {
         "fromDate": result["request"]["startAt"],
         "toDate": result["request"]["endAt"],
-        "page": 1,
-        "size": top_n,
+        "page": page,
+        "size": size,
     }
     status, body = _post("/Admin/Dashboard/Revenue/SalesByCustomer", payload)
     result["http_status"] = status
@@ -358,14 +365,16 @@ def query_dashboard_sales_by_customer(
     meta = body.get("meta", {}) if isinstance(body, dict) else {}
     result["ok"] = True
     result["data"] = body
-    # These cards on Rocky Lens are derived from the currently selected Top N,
-    # while the customer count comes from the response's total row count.
+    # The rows and their sums apply to this page only. `meta.total` is the
+    # complete number of customers matching Rocky's upstream scope.
     result["dashboard_summary"] = {
-        "top_n": top_n,
-        "total_revenue": sum((row.get("totalRevenue") or 0) for row in rows),
+        "page": page,
+        "page_size": size,
+        "page_revenue": sum((row.get("totalRevenue") or 0) for row in rows),
         "customer_count": meta.get("total"),
-        "num_order": sum((row.get("numOrder") or 0) for row in rows),
-        "num_return_order": sum((row.get("numReturnOrder") or 0) for row in rows),
+        "page_num_order": sum((row.get("numOrder") or 0) for row in rows),
+        "page_num_return_order": sum((row.get("numReturnOrder") or 0) for row in rows),
+        "scope": "current_page_only",
     }
     return result
 

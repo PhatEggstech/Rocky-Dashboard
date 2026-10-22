@@ -46,7 +46,7 @@ def query_my_api_capabilities():
         dict(tool='get_dashboard_order_by_site', method='POST', endpoint='/Admin/Dashboard/Order/BySite',
              description='Tong quan theo chi nhanh.'),
         dict(tool='get_dashboard_sales_by_customer', method='POST', endpoint='/Admin/Dashboard/Revenue/SalesByCustomer',
-             description='Doanh so theo khach hang theo giao dien Dashboard.'),
+             description='Doanh so theo khach hang theo giao dien Dashboard, co page/page_size (toi da 100 dong/trang).'),
     ]
     dashboard_debt_tools = [
         dict(tool='get_dashboard_debt_overview', method='POST',
