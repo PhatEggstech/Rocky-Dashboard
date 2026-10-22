@@ -29,6 +29,18 @@ API_ONLY_TOOLS=frozenset({
 })
 
 
+_API_ADAPTER_ALTERNATIVES = {
+    'get_customer_sales': ['get_dashboard_sales_by_customer', 'get_portal_list'],
+    'get_customer_debt_profile': ['get_dashboard_debt_overview', 'get_dashboard_debt_customers', 'get_portal_list'],
+    'get_debt': ['get_dashboard_debt_overview', 'get_dashboard_debt_customers'],
+    'get_inventory': ['get_portal_list'],
+    'get_inventory_live': ['get_portal_list'],
+    'get_staff_revenue': ['get_dashboard_metric', 'get_portal_list'],
+    'get_products': ['get_dashboard_metric', 'get_portal_list'],
+    'get_stores': ['get_dashboard_order_by_site', 'get_portal_list'],
+}
+
+
 def allowed_read_post(path):
     if os.environ.get('MCP_PORTAL_ALLOW_READ_POST','false').lower() not in {'true','1','yes'}:
         return False
@@ -48,13 +60,17 @@ def dispatch(func,args,kwargs):
     if not user or not getattr(user,'portal_session',''):
         return {'error':'Sign in with your own Rocky Dashboard account','code':401,'login_required':True}
     if func.__name__ not in API_ONLY_TOOLS:
+        alternatives = _API_ADAPTER_ALTERNATIVES.get(
+            func.__name__,
+            ['get_my_api_capabilities', 'get_portal_list', 'get_dashboard_metric'],
+        )
         return {
             'error': 'This operation has no verified per-user Rocky API adapter. '
                      'MCP does not use raw SQL or legacy direct queries for Portal sessions.',
             'code': 403,
             'api_only': True,
             'scope': 'The signed-in account can still use the listed read-only Portal and Dashboard API tools, subject to its Rocky permissions.',
-            'alternatives': sorted(API_ONLY_TOOLS),
+            'alternatives': alternatives,
         }
     import inspect
     result=inspect.unwrap(func)(*args,**kwargs)

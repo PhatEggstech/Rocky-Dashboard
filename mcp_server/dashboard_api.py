@@ -340,7 +340,7 @@ def query_dashboard_sales_by_customer(
     """Return one read-only Dashboard sales-by-customer page."""
     if not 1 <= top_n <= 100:
         raise ValueError("top_n must be between 1 and 100")
-    if not 1 <= page <= 10_000:
+    if page < 1:
         raise ValueError("page must be positive")
     size = top_n if page_size is None else page_size
     if not 1 <= size <= 100:
@@ -436,7 +436,7 @@ def query_dashboard_debt_customers(
     size: int = 20,
 ) -> dict[str, Any]:
     """Return the paged customer-debt list from the Dashboard API."""
-    if not 1 <= page <= 10_000 or not 1 <= size <= 100:
+    if page < 1 or not 1 <= size <= 100:
         raise ValueError("page must be positive and size must be between 1 and 100")
     result = _base_result("dashboard_debt_customers", date_from, date_to, 1, None, None)
     request = result["request"]

@@ -84,6 +84,7 @@ def query_my_api_capabilities():
             'Orders visible to a token are not automatically personal orders or all system orders.',
             'For my revenue orders use ownership=mine_revenue. Creator/processor/shipper ownership meanings are not implemented; clarify rather than substitute.',
             'For monthly orders or payments pass date_from/date_to; the date field is issueAt in Vietnam time. Do not scan thousands of pages to filter locally.',
+            'get_portal_list supports every positive page number and up to 100 rows per request. Continue with Rocky API pages when a complete list is requested; never call the first page a complete list.',
             'For SSO receipt questions, call get_portal_list(resource="payments") with date_from/date_to. Do not call legacy SQL receipt tools.',
             'Never treat this catalog or a role name as authorization to an object.',
             'Use only registered tools and documented arguments; do not invent an endpoint.',

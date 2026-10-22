@@ -49,7 +49,9 @@ def query_portal_list(resource, page=1, size=20, date_from=None, date_to=None, c
     user=get_current_user()
     if not user or not user.portal_session:
         return _error('Individual Rocky sign-in required',401,login_required=True)
-    if resource not in READ_LISTS or type(page) is not int or type(size) is not int or not 1<=page<=10000 or not 1<=size<=100:
+    # `size=100` is Rocky's documented upstream page size.  There is no MCP
+    # page ceiling: a signed-in user may request every page that Rocky exposes.
+    if resource not in READ_LISTS or type(page) is not int or type(size) is not int or page < 1 or not 1 <= size <= 100:
         return _error('Invalid list resource or pagination',400)
     service,name,_=READ_LISTS[resource]
     payload={'page':page,'size':size}
@@ -147,7 +149,7 @@ def query_product_industry_sales_api(date_from: str, date_to: str) -> dict:
     product_pages.extend(first.get('data') or [])
     meta = first.get('meta') or {}
     page_count = meta.get('pageCount')
-    if not isinstance(page_count, int) or page_count < 1 or page_count > 100:
+    if not isinstance(page_count, int) or page_count < 1:
         return _error('Invalid Rocky product pagination metadata', 502)
     for page in range(2, page_count + 1):
         response = query_portal_list('products', page=page, size=100)
@@ -256,10 +258,6 @@ def query_orders_created_summary(date_from: str, date_to: str) -> dict:
     if not isinstance(total, int) or total < 0:
         return _error('Rocky order list did not provide a valid total', 502)
     page_count = (total + 99) // 100
-    # A broad period can be expensive. Never return a partial total.
-    if page_count > 100:
-        return _error('Too many orders for one summary; narrow the date range', 413)
-
     pages = [first]
     for page in range(2, page_count + 1):
         response = query_portal_list(
@@ -332,6 +330,7 @@ def query_orders_created_summary(date_from: str, date_to: str) -> dict:
             ),
         },
         'page_count': page_count,
+        'crawl_policy': 'All Rocky API pages in the requested period were read; MCP does not impose a page cap.',
         'complete': True,
     }
 
@@ -355,9 +354,6 @@ def query_effective_date_payment_summary(date_from: str, date_to: str) -> dict:
     if not isinstance(total, int) or total < 0:
         return _error('Rocky payment list did not provide a valid total', 502)
     page_count = (total + 99) // 100
-    if page_count > 100:
-        return _error('Too many payment documents for one summary; narrow the date range', 413)
-
     pages = [first]
     for page in range(2, page_count + 1):
         response = query_portal_list(
@@ -408,6 +404,7 @@ def query_effective_date_payment_summary(date_from: str, date_to: str) -> dict:
             'adding it can double count cash collection.'
         ),
         'page_count': page_count,
+        'crawl_policy': 'All Rocky API pages in the requested period were read; MCP does not impose a page cap.',
         'complete': True,
     }
 

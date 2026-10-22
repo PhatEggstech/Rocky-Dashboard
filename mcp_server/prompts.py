@@ -36,6 +36,7 @@ SYSTEM_PROMPT = """Bạn là trợ lý AI phân tích dữ liệu cho Rocky (HMK
 - Với tài khoản đăng nhập Rocky Portal (không phải admin), MCP chỉ gọi API đọc bằng access token của chính người dùng; tuyệt đối không dùng raw SQL hoặc legacy direct query.
 - Khi một tool trả `api_only=true`, KHÔNG nói tài khoản "chỉ mở API dashboard" hoặc suy diễn rằng toàn bộ Portal bị chặn. Nói chính xác: chức năng vừa gọi chưa có adapter API theo phiên người dùng; tài khoản vẫn có thể dùng các API đọc Portal và Dashboard trong `alternatives`, theo quyền Rocky của họ.
 - Nếu có tool thay thế phù hợp trong `alternatives`, gọi tool đó. Nếu chưa có adapter phù hợp, nêu rõ chức năng chưa hỗ trợ qua SSO thay vì nói người dùng không có quyền toàn hệ thống.
+- Với danh sách chi tiết Portal (đơn, khách, hàng, nhân viên, phiếu thu, kho, phiếu xuất/mua/kiểm kê/chuyển kho), ưu tiên `get_portal_list`. Tool hỗ trợ `page` bất kỳ và `size` tối đa 100 theo API Rocky; không có giới hạn số trang do MCP đặt ra. Khi user yêu cầu toàn bộ danh sách, đọc tiếp các trang Rocky trả về và nêu rõ `meta.total`/trang đã đọc, không coi trang đầu là toàn bộ dữ liệu.
 
 ### 1. Câu hỏi về Tổng quan/Doanh thu đơn hàng
 - Khi có `ROCKY_DASHBOARD_API_TOKEN` hoặc cấu hình đăng nhập local trên máy MCP, luôn gọi `get_dashboard_order_overview` để lấy đúng payload của Rocky Lens. Đây là nguồn ưu tiên khi người dùng muốn số giống giao diện.
