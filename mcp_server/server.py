@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from fastmcp import FastMCP
 
 from .prompts import SYSTEM_PROMPT
+from .portal_tool_visibility import PortalToolVisibilityMiddleware
 from .tools import (
     query_revenue,
     query_subtotal,
@@ -101,6 +102,7 @@ mcp = FastMCP(
     "Rocky Dashboard",
     instructions=SYSTEM_PROMPT,
     version=MCP_VERSION,
+    middleware=[PortalToolVisibilityMiddleware()],
 )
 
 
